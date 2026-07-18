@@ -1,7 +1,7 @@
 ---
 doc_type: requirement-spec
 service: kart-offer-service
-status: pending-approval
+status: approved
 generated_by: requirement-agent
 source: docs/requirements/kart-requirements.md
 ---
@@ -68,16 +68,19 @@ Final contract is the API Design Agent's job, not this spec's.
 
 ## 6. Open Questions / Flagged Ambiguities
 
-These block sign-off and must be resolved by a human before the Architecture Agent runs:
+**Resolved (blocking):**
 
-1. **`ProductPriceChanged` publisher contradiction.** BRD §5.4's service table lists **Product** as the publisher and **Pricing** as a consumer. BRD §10's Event Catalog lists **Pricing** as the publisher, with Search/Wishlist as consumers, and doesn't mention Pricing consuming it at all. These can't both be true. Which service actually owns/publishes this event?
-2. **Coupon redemption criticality.** The BRD's own retry table (§10) gives `CouponRedeemed` a 2x retry with no on-call paging — the same tier as `ReviewSubmitted`, not the 5x/paged tier reserved for `Payment*`. But coupon redemption is a discount on a monetary transaction. Should Coupon's idempotency/retry posture match Payment's (per the API standards' general "money-moving" language), or is the BRD's looser 2x/no-page classification intentional because Order/Payment idempotency already prevents double-charge downstream?
-3. **Coupon redemption limit semantics.** BRD §2.1 says "issuance, redemption, limits" with no further detail. Per-user? Per-code global cap? Time-windowed? This materially affects the Coupon aggregate's invariants and the DDD Agent's model.
-4. **Pricing↔Promotion integration contract.** The BRD implies Promotion activation affects Pricing's quote computation but doesn't specify whether this is an in-process domain call (both live in the same bounded context per ADR-0001) or an internal event (`PromotionActivated` consumed by Pricing). No consumer is listed for `PromotionActivated` in BRD §10.
-5. **PricingQuote consumer.** `PriceQuoteIssued` (BRD §5.4) has no listed consumer in the Event Catalog (§10) at all — is it purely informational/audit, or does Cart/Order actually consume it?
+1. **`ProductPriceChanged` publisher contradiction — RESOLVED.** Product publishes it (BRD §5.4's service table stands); Pricing is a consumer, not the publisher. BRD §10's Event Catalog entry was the error. Product owns the catalog/list price; Pricing only computes derived quotes (tax, currency, promotions applied) and never announces base price changes.
+
+**Carried forward (non-blocking — resolved by a later pipeline stage, not here):**
+
+2. **Coupon redemption criticality** — BRD gives `CouponRedeemed` 2x retry, no paging (not the `Payment*` 5x/paged tier). Carried to the **Event Design Agent** stage to decide the actual retry/DLQ policy for this service.
+3. **Coupon redemption limit semantics** (per-user/per-code/global/time-windowed) — carried to the **DDD Agent** stage; materially affects the `Coupon` aggregate's invariants.
+4. **Pricing↔Promotion integration contract** (in-process call vs. internal event) — this is the **Architecture Agent**'s own job (sync vs. async dependency identification per its charter), not a Requirement Agent blocker. Left open for that stage.
+5. **`PriceQuoteIssued` consumer** — no consumer listed in BRD §10. Carried to the **API/Event Design Agent** stages to confirm whether Cart/Order actually consume it or it's audit-only.
 
 ## Sign-off
 
-- [ ] Open questions above resolved
-- [ ] Reviewed by: _______________
-- [ ] Approved to proceed to Architecture Agent
+- [x] Blocking open questions resolved (Q1)
+- [x] Reviewed by: kakon-mehedi
+- [x] Approved to proceed to Architecture Agent
