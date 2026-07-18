@@ -20,7 +20,7 @@ Concrete choices for this platform, layered on top of the project-agnostic stand
 
 ## Bounded Contexts
 
-Order, Payment, Inventory, Offer, and other kart domain services — see [PLATFORM_BLUEPRINT.md](../PLATFORM_BLUEPRINT.md) and [kart-requirements.md](../../kart-requirements.md) for the full domain model and repository list.
+Order, Payment, Inventory, Offer, and other kart domain services — see [PLATFORM_BLUEPRINT.md](../PLATFORM_BLUEPRINT.md) and [kart-requirements.md](../requirements/kart-requirements.md) for the full domain model and repository list.
 
 ## Money-Moving Criticality
 

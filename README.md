@@ -13,6 +13,16 @@ cp reusables.config.example.json reusables.config.json
 
 ## Docs
 
-- [`kart-requirements.md`](kart-requirements.md) — business requirements
-- [`docs/PLATFORM_BLUEPRINT.md`](docs/PLATFORM_BLUEPRINT.md) — implementation blueprint
+- [`docs/requirements/kart-requirements.md`](docs/requirements/kart-requirements.md) — business requirements (BRD)
+- [`docs/PLATFORM_BLUEPRINT.md`](docs/PLATFORM_BLUEPRINT.md) — implementation blueprint for the agent pipeline that builds Kart
 - [`docs/standards/kart-conventions.md`](docs/standards/kart-conventions.md) — KART-specific naming, bounded contexts, and conventions layered on top of the shared standards in `agent-reusables`
+- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/services/<name>/`](docs/services/) — per-service design record (requirement spec → architecture → DDD model → contracts), populated by the agent pipeline below
+
+## Agent Pipeline
+
+The blueprint (§8) describes a multi-agent pipeline that turns the BRD into running services: Requirement → Architecture → DDD → API/Database/Event Design → Ticket → Scaffold → Coding → Review → ... Each stage is a human-approval gate before the next runs.
+
+Implemented as Claude Code subagents under [`.claude/agents/`](.claude/agents/), one per pipeline stage, added incrementally rather than all at once.
+
+- **`requirement-agent`** — done. First run produced [`docs/services/kart-offer-service/requirement-spec.md`](docs/services/kart-offer-service/requirement-spec.md) (pilot: the Coupon/Pricing/Promotion merge per [ADR-0001](docs/adr/0001-offer-service-merge.md)). It's pending your sign-off — it flags real BRD contradictions/ambiguities that need a human answer before the Architecture Agent can run.
