@@ -1,7 +1,7 @@
 ---
 doc_type: architecture
 service: kart-offer-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
 source: docs/services/kart-offer-service/requirement-spec.md
 ---
@@ -37,5 +37,5 @@ One risk worth naming for the Database Design Agent: `/pricing/quote` must remai
 
 ## Sign-off
 
-- [ ] Reviewed by: _______________
-- [ ] Approved to proceed to DDD Agent
+- [x] Reviewed by: kakon-mehedi
+- [x] Approved to proceed to DDD Agent
