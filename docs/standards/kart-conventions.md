@@ -8,7 +8,7 @@ applies_to_agents: [architecture-agent, ddd-agent, api-design-agent, event-desig
 
 # Kart-Specific Conventions
 
-Concrete choices for this platform, layered on top of the project-agnostic standards in [agent-reusables](../../../agent-reusables/docs/standards/).
+Concrete choices for this platform, layered on top of the project-agnostic standards in [agent-reusables](https://github.com/kakon-mehedi/agent-reusables) (`docs/standards/` there). Your local checkout path is set in `reusables.config.json` at the repo root — see [README.md](../../README.md).
 
 ## Naming
 
