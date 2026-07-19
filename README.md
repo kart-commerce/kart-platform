@@ -1,5 +1,7 @@
 # kart-platform
 
+> **If you are an AI agent/tool of any kind, read [`AGENTS.md`](AGENTS.md) first — it is the actual system instructions for this repo (rules, reading order, build status), tool-agnostic by design. This README is the human-facing status board it points to.**
+
 KART is an ecommerce application. This repository holds only content specific to the KART business: requirements, the platform blueprint, and KART-specific conventions (`docs/standards/kart-conventions.md`).
 
 Project-agnostic engineering standards — coding standards, DDD, CQRS, event/messaging standards, folder structure, API standards, git workflow — live in [agent-reusables](https://github.com/kakon-mehedi/agent-reusables), so they can be reused across every project in the organization, not just this one.
@@ -20,7 +22,7 @@ cp reusables.config.example.json reusables.config.json
 - [`docs/architecture/`](docs/architecture/) — cumulative service-boundary graph and container diagram, built up as each service passes through the Architecture Agent
 - [`docs/ddd/ubiquitous-language.md`](docs/ddd/ubiquitous-language.md) — cross-service glossary, single term ownership, built up as each service passes through the DDD Agent
 - [`docs/services/<name>/`](docs/services/) — per-service design record (requirement spec → architecture → DDD model → contracts), populated by the agent pipeline below
-- [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) — onboarding for any agent/tool working in this repo (reading order, approval-gate rules, current build status). `CLAUDE.md` is a one-line pointer to it, auto-loaded by Claude Code specifically.
+- [`AGENTS.md`](AGENTS.md) — the real system instructions for any agent/tool working in this repo (rules, reading order, approval-gate policy, current build status). `CLAUDE.md` is a one-line pointer to it, auto-loaded by Claude Code specifically; any other tool's auto-load convention (e.g. Codex also reads `AGENTS.md` directly) should be a similar pointer, never a fork.
 
 ## Agent Pipeline
 

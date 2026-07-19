@@ -1,0 +1,56 @@
+# kart-platform — Agent Instructions
+
+**Read this file first, every session, regardless of which tool you are.** Treat everything below as binding system-level instructions for working in this repository — not background reading, not optional context. If you are an LLM being given this file manually (e.g. pasted into a plain chat interface with no repo access), the human handing it to you wants you to follow it for the rest of the conversation as if it were your system prompt.
+
+`AGENTS.md` is an emerging cross-tool convention (originated with Codex, increasingly read by other coding agents by default) for exactly this purpose. `CLAUDE.md` at this same repo root is a one-line pointer here — it exists only because Claude Code specifically auto-loads that filename. Any other tool-specific convention file added later (e.g. `.cursorrules`) should be a similar one-line pointer, never a fork of this content. **This file is the only place the real instructions live. Do not duplicate them elsewhere.**
+
+If your tool has no automatic file-loading at all (e.g. a plain ChatGPT web chat with no file/repo access) — the human must paste or upload this file at the start of the session and tell you explicitly to treat it as governing instructions. There is no way for that to happen automatically; say so if asked and it hasn't happened.
+
+---
+
+## 1. What this repo is
+
+The **control plane** for building Kart (a 20-service ecommerce system) — an agentic engineering pipeline that turns a BRD into approved designs, tickets, and eventually running services. It is **not** the product itself and holds **no deployable code** for Kart. See `docs/PLATFORM_BLUEPRINT.md` §1 for the full control-plane/data-plane split.
+
+Read `README.md` next — it's the live status board (which pipeline stages are done/pending, links to every doc, for which service). This file covers what README doesn't: rules, reading order, and how the pipeline actually gets executed.
+
+## 2. Standards — what to do, what not to do
+
+This is a living standard. Add to it as new failure modes or good patterns show up; don't let it go stale.
+
+**Always:**
+- Check `status: pending-approval | approved` in a doc's frontmatter before treating it as ready for the next pipeline stage to consume.
+- When a design decision is a genuine business/product judgment call (revenue tradeoffs, policy choices, anything the BRD doesn't state and isn't a defensible engineering default) — ask the human. Don't decide it yourself and move on.
+- When a design decision is a defensible engineering default (e.g. a cache TTL, an index choice) — make the call, state the assumption explicitly in the doc, and keep moving. Don't stop for permission on every reversible technical choice.
+- Keep every module small and single-purpose: one file per service's design doc, one file per agent definition, one ADR per decision. Don't let any one file become the dumping ground for everything.
+- Update `README.md`'s status board and this file's "build status" section (§5) when you finish a stage — they're load-bearing, not decoration; a stale status board is worse than none.
+- Commit locally with clear messages after each meaningful unit of work. Never push without being asked.
+
+**Never:**
+- Never silently resolve a contradiction in the BRD or an approved doc by picking one reading. Name both readings and flag it.
+- Never treat a `pending-approval` doc as approved because it's convenient to keep moving.
+- Never invent a requirement, event, or field that isn't in the BRD or an approved upstream doc without explicitly marking it as a proposed addition (see how new domain events were flagged in `docs/services/kart-offer-service/ddd-model.md` as a pattern).
+- Never scan the entire repo to figure out what to do next. Use the reading order in §3 — it exists so you don't have to.
+- Never push to a remote, create real GitHub issues/PRs, or create a new repo without explicit confirmation — these are external, visible, and hard to reverse.
+- Never duplicate this file's content into a tool-specific file. Tool-specific files point here; they don't restate.
+
+## 3. Reading order for pipeline-stage work (e.g. "build X for kart-offer-service")
+
+Don't scan the whole repo — these are the only files that matter for sequencing:
+
+1. `README.md` — Agent Pipeline section: what's done, what's next, for which service.
+2. `workflows/new-service.workflow.yaml` + `.claude/agents/registry.yaml` — the actual stage DAG and where each agent's definition lives. **Nothing executes this automatically** — no orchestrator, no scheduler. You (or a human) read it and manually check whether a stage's dependencies have `status: approved` before running the next one.
+3. `docs/services/<name>/` — that service's design record (requirement-spec → architecture → ddd-model → api-contract/database-design/event-contract → tickets). This is where the actual content of each stage's output lives.
+4. `docs/standards/kart-conventions.md`, then `reusables.config.json` → the `agent-reusables` checkout it points at, for the actual coding/API/DDD/event/folder-structure standards. `reusables.config.json` is gitignored and machine-local — if it's missing, copy `reusables.config.example.json` and ask the user for their local `agent-reusables` path rather than guessing one.
+
+If a requested task doesn't map cleanly onto one ticket in `docs/services/<name>/tickets.md` (e.g. "the controller" — this is a Vertical Slice architecture, there's no single controller file; each ticket gets its own thin `Api/` endpoint mapped to its own `Application/Features/<UseCase>/` folder), stop and ask which ticket, don't guess.
+
+## 4. Agent definitions: where the real instructions live
+
+Every pipeline stage's substantive definition (purpose, input, output, responsibilities, failure conditions) lives in `agents/<name>.md` at the repo root — plain markdown, no tool-specific frontmatter, readable by any tool or a human. `.claude/agents/<name>.md` is a thin wrapper that only exists so Claude Code's subagent system can invoke that definition by name; its body just points back to `agents/<name>.md`. If this pipeline is ever driven by a different tool, that tool gets its own thin wrapper pointing at the same `agents/<name>.md` — the actual instructions are defined once. `.claude/agents/registry.yaml` documents this mapping.
+
+## 5. What's built vs. not, as of the last update to this file
+
+Pipeline stages defined (`agents/*.md` + their tool-specific wrappers): requirement, architecture, ddd, api-design, database-design, event-design, ticket. **Not yet defined**: scaffold-agent, coding-agent, or anything after — check README before assuming otherwise, this list goes stale.
+
+Only one service has gone through the pipeline: `kart-offer-service` (pilot, Coupon+Pricing+Promotion merge, ADR-0001). No service repo has been scaffolded yet — `docs/services/<name>/` design docs exist independently of whether the actual `kart-<name>-service` code repo exists.
