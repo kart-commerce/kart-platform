@@ -2,7 +2,7 @@
 
 **Read this file first, every session, regardless of which tool you are.** Treat everything below as binding system-level instructions for working in this repository — not background reading, not optional context. If you are an LLM being given this file manually (e.g. pasted into a plain chat interface with no repo access), the human handing it to you wants you to follow it for the rest of the conversation as if it were your system prompt.
 
-`AGENTS.md` is an emerging cross-tool convention (originated with Codex, increasingly read by other coding agents by default) for exactly this purpose. `CLAUDE.md` at this same repo root is a one-line pointer here — it exists only because Claude Code specifically auto-loads that filename. Any other tool-specific convention file added later (e.g. `.cursorrules`) should be a similar one-line pointer, never a fork of this content. **This file is the only place the real instructions live. Do not duplicate them elsewhere.**
+`AGENTS.md` is an emerging cross-tool convention (originated with Codex, increasingly read by other coding agents by default) for exactly this purpose — read directly, no per-tool pointer file needed unless a specific tool requires its own exact filename to auto-load (verify before assuming). **This file is the only place the real instructions live. Do not duplicate them elsewhere.**
 
 If your tool has no automatic file-loading at all (e.g. a plain ChatGPT web chat with no file/repo access) — the human must paste or upload this file at the start of the session and tell you explicitly to treat it as governing instructions. There is no way for that to happen automatically; say so if asked and it hasn't happened.
 
@@ -39,7 +39,7 @@ This is a living standard. Add to it as new failure modes or good patterns show 
 Don't scan the whole repo — these are the only files that matter for sequencing:
 
 1. `README.md` — Agent Pipeline section: what's done, what's next, for which service.
-2. `workflows/new-service.workflow.yaml` + `.claude/agents/registry.yaml` — the actual stage DAG and where each agent's definition lives. **Nothing executes this automatically** — no orchestrator, no scheduler. You (or a human) read it and manually check whether a stage's dependencies have `status: approved` before running the next one.
+2. `.claude/agents/registry.yaml` — where each agent's real definition lives (in `agent-reusables`, resolved via `reusables.config.json`) — and `<reusablesPath>/workflows/new-service.workflow.yaml` for the actual stage DAG. **Nothing executes this automatically** — no orchestrator, no scheduler. You (or a human) read it and manually check whether a stage's dependencies have `status: approved` before running the next one.
 3. `docs/services/<name>/` — that service's design record (requirement-spec → architecture → ddd-model → api-contract/database-design/event-contract → tickets). This is where the actual content of each stage's output lives.
 4. `docs/standards/kart-conventions.md`, then `reusables.config.json` → the `agent-reusables` checkout it points at, for the actual coding/API/DDD/event/folder-structure standards. `reusables.config.json` is gitignored and machine-local — if it's missing, copy `reusables.config.example.json` and ask the user for their local `agent-reusables` path rather than guessing one.
 
@@ -47,7 +47,7 @@ If a requested task doesn't map cleanly onto one ticket in `docs/services/<name>
 
 ## 4. Agent definitions: where the real instructions live
 
-Every pipeline stage's substantive definition (purpose, input, output, responsibilities, failure conditions) lives in `agents/<name>.md` at the repo root — plain markdown, no tool-specific frontmatter, readable by any tool or a human. `.claude/agents/<name>.md` is a thin wrapper that only exists so Claude Code's subagent system can invoke that definition by name; its body just points back to `agents/<name>.md`. If this pipeline is ever driven by a different tool, that tool gets its own thin wrapper pointing at the same `agents/<name>.md` — the actual instructions are defined once. `.claude/agents/registry.yaml` documents this mapping.
+Every pipeline stage's substantive definition (purpose, input, output, responsibilities, failure conditions) is **not local to this repo** — it lives in `agent-reusables` at `agents/<name>.md` (path resolved via `reusablesPath` in `reusables.config.json`), because the pipeline methodology itself isn't Kart-specific. `.claude/agents/<name>.md` here is a thin wrapper that only exists so Claude Code's subagent system can invoke that definition by name; its body just points at the reusables copy. `.claude/agents/registry.yaml` documents this mapping.
 
 ## 5. Current build status
 

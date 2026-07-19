@@ -18,22 +18,21 @@ cp reusables.config.example.json reusables.config.json
 - [`docs/requirements/kart-requirements.md`](docs/requirements/kart-requirements.md) — business requirements (BRD)
 - [`docs/PLATFORM_BLUEPRINT.md`](docs/PLATFORM_BLUEPRINT.md) — implementation blueprint for the agent pipeline that builds Kart
 - [`docs/standards/kart-conventions.md`](docs/standards/kart-conventions.md) — KART-specific naming, bounded contexts, and conventions layered on top of the shared standards in `agent-reusables`
-- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/adr/`](docs/adr/) — architecture decision records specific to Kart (the blank ADR template is reusable and lives in `agent-reusables`)
 - [`docs/architecture/`](docs/architecture/) — cumulative service-boundary graph and container diagram, built up as each service passes through the Architecture Agent
 - [`docs/ddd/ubiquitous-language.md`](docs/ddd/ubiquitous-language.md) — cross-service glossary, single term ownership, built up as each service passes through the DDD Agent
 - [`docs/services/<name>/`](docs/services/) — per-service design record (requirement spec → architecture → DDD model → contracts), populated by the agent pipeline below
-- [`AGENTS.md`](AGENTS.md) — the real system instructions for any agent/tool working in this repo (rules, reading order, approval-gate policy, current build status). `CLAUDE.md` is a one-line pointer to it, auto-loaded by Claude Code specifically; any other tool's auto-load convention (e.g. Codex also reads `AGENTS.md` directly) should be a similar pointer, never a fork.
+- [`AGENTS.md`](AGENTS.md) — the real system instructions for any agent/tool working in this repo (rules, reading order, approval-gate policy). Read directly — no per-tool pointer file in this repo.
 
 ## Agent Pipeline
 
 The blueprint (§8) describes a multi-agent pipeline that turns the BRD into running services: Requirement → Architecture → DDD → API/Database/Event Design → Ticket → Scaffold → Coding → Review → ... Each stage is a human-approval gate before the next runs.
 
-Each stage's real definition (purpose, input, output, responsibilities, failure conditions) lives in [`agents/<name>.md`](agents/) — plain markdown, no tool-specific syntax, portable to any coding agent. [`.claude/agents/<name>.md`](.claude/agents/) is a thin Claude Code wrapper that just points back to it, so Claude Code's subagent system can invoke it by name without the actual instructions being locked to this tool. There is no automated orchestrator — sequencing is documented as data, not executed by a scheduler:
+The pipeline methodology itself (each stage's definition, and the DAG that sequences them) isn't Kart-specific, so it lives in [`agent-reusables`](https://github.com/kakon-mehedi/agent-reusables) — `agents/<name>.md` per stage, `workflows/new-service.workflow.yaml` for the DAG — resolved via this repo's `reusables.config.json`, same as the coding standards. [`.claude/agents/<name>.md`](.claude/agents/) here is a thin Claude Code wrapper that just points at the reusables copy. There is no automated orchestrator — sequencing is documented as data, not executed by a scheduler:
 
-- [`.claude/agents/registry.yaml`](.claude/agents/registry.yaml) — agent name → tool-agnostic definition → Claude Code wrapper
-- [`workflows/new-service.workflow.yaml`](workflows/new-service.workflow.yaml) — the actual DAG: stage order, `depends_on`, and whether each stage requires human approval before the next runs
+- [`.claude/agents/registry.yaml`](.claude/agents/registry.yaml) — agent name → where its real definition lives (in `agent-reusables`) → Claude Code wrapper
 
-A human (or a Claude Code session picking this repo up cold) reads those two files to know what to run next, checking each dependency's output doc for `status: approved` in its frontmatter before running the next stage — same as this session has been doing manually.
+A human (or a Claude Code session picking this repo up cold) reads that file, then the DAG in `agent-reusables`, to know what to run next — checking each dependency's output doc for `status: approved` in its frontmatter before running the next stage, same as this session has been doing manually.
 
 Pilot service: `kart-offer-service` (Coupon/Pricing/Promotion merge per [ADR-0001](docs/adr/0001-offer-service-merge.md)).
 

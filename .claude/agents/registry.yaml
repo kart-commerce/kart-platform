@@ -3,19 +3,24 @@
 # This is a lookup table, not an execution engine. Nothing reads this
 # file automatically and runs agents in order. A human (or a Claude
 # Code session picking up this repo cold) reads this alongside
-# ../../workflows/new-service.workflow.yaml to know what exists and
-# where its definition lives, before deciding what to run next.
+# ../../workflows.workflow (see agent-reusables, path below) to know
+# what exists before deciding what to run next.
 #
 # Each agent's substantive instructions (purpose, input, output,
-# responsibilities, failure conditions) live in the tool-agnostic
-# `definition` path — plain markdown, no tool-specific frontmatter,
-# readable by any coding agent or a human. `claude_code_wrapper` is a
-# thin Claude Code subagent file (frontmatter: name/description/tools)
-# whose body just says "go read the definition" — it exists only so
+# responsibilities, failure conditions) live in agent-reusables —
+# they're project-agnostic, not kart-specific — at the `definition`
+# path below, resolved relative to `reusablesPath` in this repo's
+# `reusables.config.json`. `claude_code_wrapper` is a thin Claude Code
+# subagent file (frontmatter: name/description/tools) whose body just
+# says "go read the definition in agent-reusables" — it exists only so
 # Claude Code's subagent system can invoke this agent by name. If this
-# pipeline is ever driven from a different tool (Codex, etc.), that
-# tool gets its own thin wrapper pointing at the same `definition` —
-# the actual instructions are never duplicated or tool-specific.
+# pipeline is ever driven from a different tool, that tool gets its own
+# thin wrapper pointing at the same agent-reusables definition — the
+# actual instructions are defined once, in one repo, for every project
+# that uses this pipeline.
+#
+# The pipeline DAG itself (stage order, depends_on, approval policy)
+# also lives in agent-reusables now: <reusablesPath>/workflows/new-service.workflow.yaml
 #
 # model_tier is "inherits" for all of these because this pipeline is
 # implemented Claude Code-native (subagents), not the blueprint's
@@ -25,35 +30,35 @@
 
 agents:
   requirement-agent:
-    definition: agents/requirement-agent.md
+    definition: agents/requirement-agent.md   # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/requirement-agent.md
     model_tier: inherits
   architecture-agent:
-    definition: agents/architecture-agent.md
+    definition: agents/architecture-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/architecture-agent.md
     model_tier: inherits
   ddd-agent:
-    definition: agents/ddd-agent.md
+    definition: agents/ddd-agent.md           # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/ddd-agent.md
     model_tier: inherits
   api-design-agent:
-    definition: agents/api-design-agent.md
+    definition: agents/api-design-agent.md    # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/api-design-agent.md
     model_tier: inherits
   database-design-agent:
-    definition: agents/database-design-agent.md
+    definition: agents/database-design-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/database-design-agent.md
     model_tier: inherits
   event-design-agent:
-    definition: agents/event-design-agent.md
+    definition: agents/event-design-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/event-design-agent.md
     model_tier: inherits
   ticket-agent:
-    definition: agents/ticket-agent.md
+    definition: agents/ticket-agent.md        # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/ticket-agent.md
     model_tier: inherits
   scaffold-agent:
-    definition: agents/scaffold-agent.md
+    definition: agents/scaffold-agent.md      # would live in agent-reusables too, if generic
     claude_code_wrapper: .claude/agents/scaffold-agent.md
     model_tier: inherits
     status: not_yet_built
