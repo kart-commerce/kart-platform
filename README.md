@@ -20,14 +20,15 @@ cp reusables.config.example.json reusables.config.json
 - [`docs/architecture/`](docs/architecture/) — cumulative service-boundary graph and container diagram, built up as each service passes through the Architecture Agent
 - [`docs/ddd/ubiquitous-language.md`](docs/ddd/ubiquitous-language.md) — cross-service glossary, single term ownership, built up as each service passes through the DDD Agent
 - [`docs/services/<name>/`](docs/services/) — per-service design record (requirement spec → architecture → DDD model → contracts), populated by the agent pipeline below
+- [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) — onboarding for any agent/tool working in this repo (reading order, approval-gate rules, current build status). `CLAUDE.md` is a one-line pointer to it, auto-loaded by Claude Code specifically.
 
 ## Agent Pipeline
 
 The blueprint (§8) describes a multi-agent pipeline that turns the BRD into running services: Requirement → Architecture → DDD → API/Database/Event Design → Ticket → Scaffold → Coding → Review → ... Each stage is a human-approval gate before the next runs.
 
-Implemented as Claude Code subagents under [`.claude/agents/`](.claude/agents/), one per pipeline stage, added incrementally rather than all at once. There is no automated orchestrator — sequencing is documented as data, not executed by a scheduler:
+Each stage's real definition (purpose, input, output, responsibilities, failure conditions) lives in [`agents/<name>.md`](agents/) — plain markdown, no tool-specific syntax, portable to any coding agent. [`.claude/agents/<name>.md`](.claude/agents/) is a thin Claude Code wrapper that just points back to it, so Claude Code's subagent system can invoke it by name without the actual instructions being locked to this tool. There is no automated orchestrator — sequencing is documented as data, not executed by a scheduler:
 
-- [`.claude/agents/registry.yaml`](.claude/agents/registry.yaml) — agent name → definition file (which agents exist, where their definitions live)
+- [`.claude/agents/registry.yaml`](.claude/agents/registry.yaml) — agent name → tool-agnostic definition → Claude Code wrapper
 - [`workflows/new-service.workflow.yaml`](workflows/new-service.workflow.yaml) — the actual DAG: stage order, `depends_on`, and whether each stage requires human approval before the next runs
 
 A human (or a Claude Code session picking this repo up cold) reads those two files to know what to run next, checking each dependency's output doc for `status: approved` in its frontmatter before running the next stage — same as this session has been doing manually.

@@ -1,4 +1,4 @@
-# Agent name -> definition file -> model tier.
+# Agent name -> where its real definition lives -> Claude Code wrapper.
 #
 # This is a lookup table, not an execution engine. Nothing reads this
 # file automatically and runs agents in order. A human (or a Claude
@@ -6,36 +6,55 @@
 # ../../workflows/new-service.workflow.yaml to know what exists and
 # where its definition lives, before deciding what to run next.
 #
+# Each agent's substantive instructions (purpose, input, output,
+# responsibilities, failure conditions) live in the tool-agnostic
+# `definition` path — plain markdown, no tool-specific frontmatter,
+# readable by any coding agent or a human. `claude_code_wrapper` is a
+# thin Claude Code subagent file (frontmatter: name/description/tools)
+# whose body just says "go read the definition" — it exists only so
+# Claude Code's subagent system can invoke this agent by name. If this
+# pipeline is ever driven from a different tool (Codex, etc.), that
+# tool gets its own thin wrapper pointing at the same `definition` —
+# the actual instructions are never duplicated or tool-specific.
+#
 # model_tier is "inherits" for all of these because this pipeline is
 # implemented Claude Code-native (subagents), not the blueprint's
 # original LLM-agnostic model-gateway design (docs/PLATFORM_BLUEPRINT.md
 # §8.1) — there is no multi-provider routing here, every stage just
-# inherits whatever model the invoking Claude Code session is using.
+# inherits whatever model the invoking session is using.
 
 agents:
   requirement-agent:
-    definition: .claude/agents/requirement-agent.md
+    definition: agents/requirement-agent.md
+    claude_code_wrapper: .claude/agents/requirement-agent.md
     model_tier: inherits
   architecture-agent:
-    definition: .claude/agents/architecture-agent.md
+    definition: agents/architecture-agent.md
+    claude_code_wrapper: .claude/agents/architecture-agent.md
     model_tier: inherits
   ddd-agent:
-    definition: .claude/agents/ddd-agent.md
+    definition: agents/ddd-agent.md
+    claude_code_wrapper: .claude/agents/ddd-agent.md
     model_tier: inherits
   api-design-agent:
-    definition: .claude/agents/api-design-agent.md
+    definition: agents/api-design-agent.md
+    claude_code_wrapper: .claude/agents/api-design-agent.md
     model_tier: inherits
   database-design-agent:
-    definition: .claude/agents/database-design-agent.md
+    definition: agents/database-design-agent.md
+    claude_code_wrapper: .claude/agents/database-design-agent.md
     model_tier: inherits
   event-design-agent:
-    definition: .claude/agents/event-design-agent.md
+    definition: agents/event-design-agent.md
+    claude_code_wrapper: .claude/agents/event-design-agent.md
     model_tier: inherits
   ticket-agent:
-    definition: .claude/agents/ticket-agent.md
+    definition: agents/ticket-agent.md
+    claude_code_wrapper: .claude/agents/ticket-agent.md
     model_tier: inherits
   scaffold-agent:
-    definition: .claude/agents/scaffold-agent.md
+    definition: agents/scaffold-agent.md
+    claude_code_wrapper: .claude/agents/scaffold-agent.md
     model_tier: inherits
     status: not_yet_built
 
