@@ -1,6 +1,7 @@
 # Kart Agentic Engineering Platform — Implementation Blueprint
 
-> Status: v1.0 draft · Owner: Platform Architecture · Source BRD: `kart-requirements.md`
+> Status: v1.0 · Owner: Platform Architecture · Source BRD: `kart-requirements.md`
+> §4–9's orchestrator/vector-DB/Model-Gateway runtime is **deferred** — the platform currently runs as the manual, human-gated Claude Code pipeline described in `AGENTS.md` and `README.md`. Revisit §4–9 only if that manual pipeline stops scaling (see §16, "Future Scalability Roadmap").
 > This document is the design of the **platform that builds Kart**, not Kart itself. Kart (the 20-service e-commerce system) is the first tenant of this platform, and the platform is designed to outlive it.
 
 ---
@@ -1182,8 +1183,8 @@ graph LR
 
 ## Appendix: Open Decisions Requiring Your Input
 
-1. Confirm or reject the Offer Service merge (Pricing+Promotion+Coupon) — recorded as ADR-0001 draft; needs your sign-off before Architecture Agent work begins for real.
-2. Confirm Inventory Service addition to Phase 1 (recommended, currently absent from your list).
-3. Confirm `kart-shared` scope discipline (contracts + generic libs only) — this is a governance rule, not just a folder convention, and needs to be enforceable (e.g., a CI check in `kart-devops` that rejects domain-specific code added to `kart-shared`).
-4. Choose initial embedding model / local-vs-API tradeoff for the Model Gateway's embedding tier (affects indexing cost and whether the platform can run fully air-gapped).
-5. Choose orchestrator runtime: self-hosted (custom, using RabbitMQ + Postgres as shown here) vs an existing workflow engine (e.g., Temporal) — the blueprint above is engine-agnostic, but §9's implementation needs one concrete choice.
+1. ~~Confirm or reject the Offer Service merge~~ — **resolved.** ADR-0001 is `status: accepted`, and Architecture/DDD/API/Database/Event Design/Ticket agents have all run against it for `kart-offer-service` (see `README.md`).
+2. Confirm Inventory Service addition to Phase 1 (recommended, currently absent from your list) — **still open**, no pipeline run yet for `kart-inventory-service`.
+3. Confirm `kart-shared` scope discipline (contracts + generic libs only), enforceable via a CI check in `kart-devops` that rejects domain-specific code added to `kart-shared` — **still open**; moot until `kart-shared` and `kart-devops` are actually scaffolded.
+4. ~~Choose initial embedding model for the Model Gateway~~ — **deferred**, not a live decision. §4–9's Model Gateway/RAG runtime isn't being built while the pipeline stays manual (see Status note above).
+5. ~~Choose orchestrator runtime (self-hosted vs Temporal)~~ — **deferred**, same reason as #4.

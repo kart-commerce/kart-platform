@@ -33,6 +33,10 @@ agents:
     definition: agents/requirement-agent.md   # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/requirement-agent.md
     model_tier: inherits
+  edge-case-analyzer-agent:
+    definition: agents/edge-case-analyzer-agent.md  # in agent-reusables, via reusables.config.json
+    claude_code_wrapper: .claude/agents/edge-case-analyzer-agent.md
+    model_tier: inherits
   architecture-agent:
     definition: agents/architecture-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/architecture-agent.md
