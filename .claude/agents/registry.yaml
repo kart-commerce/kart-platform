@@ -1,0 +1,49 @@
+# Agent name -> definition file -> model tier.
+#
+# This is a lookup table, not an execution engine. Nothing reads this
+# file automatically and runs agents in order. A human (or a Claude
+# Code session picking up this repo cold) reads this alongside
+# ../../workflows/new-service.workflow.yaml to know what exists and
+# where its definition lives, before deciding what to run next.
+#
+# model_tier is "inherits" for all of these because this pipeline is
+# implemented Claude Code-native (subagents), not the blueprint's
+# original LLM-agnostic model-gateway design (docs/PLATFORM_BLUEPRINT.md
+# §8.1) — there is no multi-provider routing here, every stage just
+# inherits whatever model the invoking Claude Code session is using.
+
+agents:
+  requirement-agent:
+    definition: .claude/agents/requirement-agent.md
+    model_tier: inherits
+  architecture-agent:
+    definition: .claude/agents/architecture-agent.md
+    model_tier: inherits
+  ddd-agent:
+    definition: .claude/agents/ddd-agent.md
+    model_tier: inherits
+  api-design-agent:
+    definition: .claude/agents/api-design-agent.md
+    model_tier: inherits
+  database-design-agent:
+    definition: .claude/agents/database-design-agent.md
+    model_tier: inherits
+  event-design-agent:
+    definition: .claude/agents/event-design-agent.md
+    model_tier: inherits
+  ticket-agent:
+    definition: .claude/agents/ticket-agent.md
+    model_tier: inherits
+  scaffold-agent:
+    definition: .claude/agents/scaffold-agent.md
+    model_tier: inherits
+    status: not_yet_built
+
+# Blueprint agents deliberately not built for this pipeline yet:
+# sprint-planner-agent (skipped — no team/capacity to plan around, see
+# README's Agent Pipeline section), coding-agent, code-review-agent,
+# security-review-agent, testing-agent, bug-fix-agent,
+# documentation-agent, memory-update-agent, docker-agent, cicd-agent,
+# deployment-agent, monitoring-agent, orchestrator-agent,
+# contract-compatibility-agent, knowledge-curator-agent,
+# incident-rollback-agent.
