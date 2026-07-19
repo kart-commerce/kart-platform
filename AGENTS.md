@@ -23,7 +23,7 @@ This is a living standard. Add to it as new failure modes or good patterns show 
 - When a design decision is a genuine business/product judgment call (revenue tradeoffs, policy choices, anything the BRD doesn't state and isn't a defensible engineering default) — ask the human. Don't decide it yourself and move on.
 - When a design decision is a defensible engineering default (e.g. a cache TTL, an index choice) — make the call, state the assumption explicitly in the doc, and keep moving. Don't stop for permission on every reversible technical choice.
 - Keep every module small and single-purpose: one file per service's design doc, one file per agent definition, one ADR per decision. Don't let any one file become the dumping ground for everything.
-- Update `README.md`'s status board and this file's "build status" section (§5) when you finish a stage — they're load-bearing, not decoration; a stale status board is worse than none.
+- Update `README.md`'s status board when you finish a stage — it's the **only** place pipeline status lives. Load-bearing, not decoration; a stale status board is worse than none.
 - Commit locally with clear messages after each meaningful unit of work. Never push without being asked.
 
 **Never:**
@@ -49,8 +49,6 @@ If a requested task doesn't map cleanly onto one ticket in `docs/services/<name>
 
 Every pipeline stage's substantive definition (purpose, input, output, responsibilities, failure conditions) lives in `agents/<name>.md` at the repo root — plain markdown, no tool-specific frontmatter, readable by any tool or a human. `.claude/agents/<name>.md` is a thin wrapper that only exists so Claude Code's subagent system can invoke that definition by name; its body just points back to `agents/<name>.md`. If this pipeline is ever driven by a different tool, that tool gets its own thin wrapper pointing at the same `agents/<name>.md` — the actual instructions are defined once. `.claude/agents/registry.yaml` documents this mapping.
 
-## 5. What's built vs. not, as of the last update to this file
+## 5. Current build status
 
-Pipeline stages defined (`agents/*.md` + their tool-specific wrappers): requirement, architecture, ddd, api-design, database-design, event-design, ticket. **Not yet defined**: scaffold-agent, coding-agent, or anything after — check README before assuming otherwise, this list goes stale.
-
-Only one service has gone through the pipeline: `kart-offer-service` (pilot, Coupon+Pricing+Promotion merge, ADR-0001). No service repo has been scaffolded yet — `docs/services/<name>/` design docs exist independently of whether the actual `kart-<name>-service` code repo exists.
+Lives in `README.md` only — not repeated here. This file is rules and process, which barely change; status changes every session and a second copy would drift. Go read README's "Agent Pipeline" section.
