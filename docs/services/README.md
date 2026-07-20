@@ -33,21 +33,20 @@ Every doc's frontmatter carries its own `status` (`pending-approval` / `approved
 - **`edge-cases.md`** — bullet-only catalogue of that service's real domain edge cases, produced by `edge-case-analyzer-agent` from its *approved* requirement spec: what happens, why, solution options, and the decision taken (3-5 bullets, chosen + why). See `agent-reusables/agents/edge-case-analyzer-agent.md`.
 - **`architecture.md`**, **`ddd-model.md`**, **`api-contract.yaml`**, **`database-design.md`**, **`event-contract.md`**, **`tickets.md`** — later pipeline stages, produced once the two docs above are approved. See `agent-reusables/workflows/new-service.workflow.yaml` for the full DAG.
 
-## Known cross-service contradictions surfaced during drafting
+## Cross-service BRD contradictions — RESOLVED
 
-These came up while drafting the 17 new requirement-specs — they're BRD-level issues, not per-service bugs, and are worth resolving centrally rather than letting each service guess independently:
+These came up while drafting the 17 new requirement-specs and the subsequent professional-grade review pass. All are now resolved via ADR in `docs/adr/`, and `kart-requirements.md` (both here and in the source `kart-requirements` repo) has been updated to reflect each resolution directly — these are no longer open questions at the BRD level:
 
-- **Order ↔ Shipping integration direction** — BRD §12.1's Saga diagram implies Order synchronously calls Shipping before confirming, but §5.4/§10 describe Shipping as an async consumer of `OrderConfirmed`. These are two different integration styles; pick one.
-- **Notification's actual consumed-event set** — §5.4 claims "almost every event," §10's Event Catalog lists only 3. This decides Notification's entire load profile and RabbitMQ bindings.
-- **Analytics' actual ingestion scope** — same shape of contradiction: §2.2/§5.4 imply full fan-in, §10 lists 6 of 13 events.
-- **`OrderCompleted` (consumed by Recommendation) has no publisher anywhere in the BRD** — Order only publishes `OrderCreated`/`OrderConfirmed`/`OrderCancelled`. Recommendation may be permanently starved of purchase signal until this is fixed.
-- **`OrderDelivered` (consumed by Review, for verified-purchase gating) has no confirmed publisher anywhere in the BRD either** — same shape as the `OrderCompleted` gap above, surfaced during the professional-grade review pass. Order's publish list is only ever `OrderCreated`/`OrderConfirmed`/`OrderCancelled`/`OrderCompensationTriggered`.
-- **Identity ↔ User data ownership** — no event exists for Identity-side profile fields (email, name) changing and propagating to User Service.
-- **Several published events are entirely absent from the BRD's Event Catalog (§10)**, despite being named in a service's own row: `CartCheckedOut`, `WishlistPriceAlertTriggered`, `AdminActionPerformed`, `OrderCompensationTriggered`, `UserRegistered`/`SessionCreated`. No retry/DLQ policy exists for any of them yet.
-- **`InventoryReleased` (shown as Inventory's reply to Order in BRD §12.2's compensation diagram) is absent from both §5.2's Publishes row and the §10 Event Catalog** — same missing-event pattern as above, surfaced during the professional-grade review pass.
-- **`kart-requirements.md` §24.1 (Cross-Cutting RBAC Model) and §24.2 (SSO / Identity Federation) were added after `kart-identity-service` and `kart-admin-service`'s `requirement-spec.md`/`edge-cases.md` were drafted.** Both docs still treat "who issues roles, who's the source of truth" as an open question that the BRD now actually answers (Identity issues, every other service — including Admin — only consumes the claim). Both need a re-draft pass to reconcile with §24.1/§24.2 before re-review; see the NEEDS-WORK notes below.
+- **Order ↔ Shipping integration direction** — resolved async, end to end. [ADR-0002](../adr/0002-order-shipping-async-integration.md).
+- **Notification's actual consumed-event set** — resolved to all `order.*`/`payment.*` routed events plus a few explicitly-named alert events. [ADR-0003](../adr/0003-notification-consumed-event-scope.md).
+- **Analytics' actual ingestion scope** — resolved to full fan-in (every published event). [ADR-0004](../adr/0004-analytics-full-fanin-ingestion.md).
+- **`OrderCompleted` (Recommendation) and `OrderDelivered` (Review) missing publishers** — unified into one new event, `OrderDelivered`, published by Order. [ADR-0005](../adr/0005-unify-order-terminal-event.md).
+- **Identity ↔ User data ownership** — resolved via a new `UserAccountUpdated` event, published by Identity, consumed by User. [ADR-0006](../adr/0006-identity-user-profile-sync-event.md).
+- **`InventoryReleased`, `InventoryReplenished`, `RefundIssued`, `CartCheckedOut`, `WishlistPriceAlertTriggered`, `AdminActionPerformed`, `UserRegistered`, `SessionCreated` missing from the Event Catalog** — all eight now have a full row (consumers + retry/DLQ tier) in §10. [ADR-0007](../adr/0007-event-catalog-completeness.md).
 
-Full detail and citations for each are in the relevant service's `requirement-spec.md` and `edge-cases.md`, under "Open Questions" / escalated decisions.
+**Still outstanding — not a BRD contradiction, but not yet propagated:** `kart-identity-service`, `kart-admin-service`, `kart-order-service`, and `kart-recommendation-service`'s own `requirement-spec.md`/`edge-cases.md` were drafted *before* these ADRs and still describe the old open questions rather than citing the resolutions. Each needs a re-draft pass (cite the relevant ADR, adopt its decision, remove the now-stale open question) before re-review — see the gap table below.
+
+Full detail and citations for the original contradictions are preserved in each ADR's Context section.
 
 ## Professional-grade review pass (this round)
 
