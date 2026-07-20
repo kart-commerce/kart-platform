@@ -37,6 +37,10 @@ agents:
     definition: agents/edge-case-analyzer-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/edge-case-analyzer-agent.md
     model_tier: inherits
+  design-decision-agent:
+    definition: agents/design-decision-agent.md  # in agent-reusables, via reusables.config.json
+    claude_code_wrapper: .claude/agents/design-decision-agent.md
+    model_tier: inherits
   architecture-agent:
     definition: agents/architecture-agent.md  # in agent-reusables, via reusables.config.json
     claude_code_wrapper: .claude/agents/architecture-agent.md

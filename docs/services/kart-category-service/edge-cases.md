@@ -1,7 +1,7 @@
 ---
 doc_type: edge-cases
 service: kart-category-service
-status: pending-approval
+status: approved
 generated_by: edge-case-analyzer-agent
 source: docs/services/kart-category-service/requirement-spec.md
 ---

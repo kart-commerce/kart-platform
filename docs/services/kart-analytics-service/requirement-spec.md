@@ -1,7 +1,7 @@
 ---
 doc_type: requirement-spec
 service: kart-analytics-service
-status: pending-approval
+status: approved
 generated_by: requirement-agent
 source: docs/requirements/kart-requirements.md
 ---
