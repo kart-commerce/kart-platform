@@ -46,7 +46,7 @@ Most tutorial e-commerce projects stop at CRUD + one database. That teaches almo
 
 |#|Service|Primary Responsibility|
 |---|---|---|
-|1|Identity Service|AuthN, tokens, sessions, MFA|
+|1|Identity Service|AuthN, tokens, sessions, MFA, SSO federation, RBAC role/claim issuance|
 |2|User Service|Profile, addresses, preferences|
 |3|Product Service|Product catalog, variants, attributes|
 |4|Category Service|Taxonomy, hierarchy, navigation|
@@ -619,11 +619,37 @@ Nginx sits in front of the gateway for TLS termination, static asset serving, an
 
 |Layer|Control|
 |---|---|
-|AuthN|OAuth2 Authorization Code flow (web/mobile clients), Client Credentials (service-to-service)|
-|AuthZ|JWT with scoped claims, validated at gateway + re-checked at service for sensitive operations|
+|AuthN|OAuth2 Authorization Code flow (web/mobile clients), Client Credentials (service-to-service), SSO via OIDC/SAML federation (see §24.2)|
+|AuthZ|JWT with scoped claims, validated at gateway + re-checked at service for sensitive operations; RBAC role claims embedded in the token, enforced platform-wide (see §24.1)|
 |Token Lifecycle|Short-lived access tokens (~15 min), rotating refresh tokens, revocation list for logout|
 |Encryption|TLS 1.3 in transit everywhere; AES-256 at rest for PII columns; payment data never stored — tokenized by the gateway provider|
 |API Security|Input validation, rate limiting, mandatory idempotency keys on all money-moving POSTs|
+
+### 24.1 Cross-Cutting RBAC Model
+
+RBAC is a platform-wide concern, not an Admin Service–local feature — every one of the 20 services trusts the same role claims rather than maintaining its own permission table. Identity Service is the single issuer of roles; every other service is a **consumer** of the claim, never a second source of truth for "who can do what."
+
+|Role|Scope|Example Grant|
+|---|---|---|
+|Customer|Own resources only (`userId` match)|Manage own cart, orders, wishlist|
+|Support Agent|Read + limited write across customer-facing services|View any order, issue a refund up to a capped amount|
+|Admin|Full back-office operations|Catalog management, coupon issuance, user suspension — all `/admin/*` routes|
+|Partner API|Scoped, non-interactive|Bulk catalog upload, order status webhook — client-credentials flow only|
+
+- **Issuance**: Identity Service resolves a user/service-principal to a role set at token-mint time and embeds it as a scoped claim in the JWT (`roles: [...]`, `scopes: [...]`) — this is the same JWT already described in §24 AuthZ, not a separate token.
+- **Enforcement**: checked twice — coarse-grained at the API Gateway (§18, reject before the request reaches a service) and fine-grained again at the owning service (e.g., "Support Agent can refund, but only up to $X" is a business rule Payment Service enforces itself, since the gateway cannot know the order total).
+- **Why not per-service role tables**: with 20 independently-deployed services, a locally-defined role table per service silently drifts (Admin's "Support" role and Order's "Support" role diverge in meaning within a year). One issuer + one claim shape is what makes RBAC auditable across the whole platform.
+
+### 24.2 SSO / Identity Federation
+
+Two distinct SSO needs, both fronted by Identity Service so downstream services never talk to an external IdP directly:
+
+|Audience|Federation Protocol|Why|
+|---|---|---|
+|Admin / back-office users|SAML 2.0 or OIDC against the org's enterprise IdP (Okta/Azure AD/Google Workspace)|Back-office staff already have a corporate identity; forcing a separate Kart-only password is both worse security (one more credential to phish/leak) and worse UX|
+|Customers|OIDC social login (Google/Apple/etc.) alongside native email/password|Reduces signup friction; still lands on the same Identity Service token issuance path, so RBAC/AuthZ downstream is identical regardless of how the user authenticated|
+
+Federation is terminated entirely at Identity Service — it exchanges the external IdP's assertion/token for Kart's own short-lived JWT (per §24 Token Lifecycle) carrying Kart-native role claims. No other service ever validates a SAML assertion or holds an external IdP client secret; this keeps the PCI/compliance-relevant blast radius (§5.3 Boundary Rationale) and the IdP integration surface both contained to one service.
 
 ---
 
