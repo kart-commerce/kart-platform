@@ -46,7 +46,7 @@ Most tutorial e-commerce projects stop at CRUD + one database. That teaches almo
 
 |#|Service|Primary Responsibility|
 |---|---|---|
-|1|Identity Service|AuthN, tokens, sessions, MFA|
+|1|Identity Service|AuthN, tokens, sessions, MFA, SSO federation, RBAC role/claim issuance|
 |2|User Service|Profile, addresses, preferences|
 |3|Product Service|Product catalog, variants, attributes|
 |4|Category Service|Taxonomy, hierarchy, navigation|
@@ -147,8 +147,8 @@ Each service below follows the same template: **Responsibility → API → Datab
 |Responsibility|Owns order lifecycle state machine: `Created → Reserved → Paid → Shipped → Delivered → Cancelled/Refunded`|
 |API|`POST /orders`, `GET /orders/{id}`, `POST /orders/{id}/cancel`|
 |Database|PostgreSQL: `orders`, `order_items`, `order_events` (write side)|
-|Publishes|`OrderCreated`, `OrderConfirmed`, `OrderCancelled`, `OrderCompensationTriggered`|
-|Consumes|`InventoryReserved`, `InventoryReservationFailed`, `PaymentCompleted`, `PaymentFailed`, `ShipmentDispatched`|
+|Publishes|`OrderCreated`, `OrderConfirmed`, `OrderCancelled`, `OrderCompensationTriggered`, `OrderDelivered`|
+|Consumes|`InventoryReserved`, `InventoryReservationFailed`, `PaymentCompleted`, `PaymentFailed`, `ShipmentDispatched`, `DeliveryStatusUpdated` (terminal "delivered" status, triggers `OrderDelivered` — see ADR-0005)|
 |Dependencies|Inventory Service (sync reserve call + async confirm), Payment Service (async), Shipping Service (async)|
 |Boundary Rationale|Order is the only service allowed to drive cross-service business transactions (Saga orchestrator) — this prevents "distributed monolith" behavior where every service calls every other service directly.|
 
@@ -159,7 +159,7 @@ Each service below follows the same template: **Responsibility → API → Datab
 |Responsibility|Stock truth per warehouse, reservation holds with TTL|
 |API|`POST /inventory/reserve`, `POST /inventory/release`, `GET /inventory/{sku}`|
 |Database|PostgreSQL with row-level `SELECT ... FOR UPDATE` on stock rows|
-|Publishes|`InventoryReserved`, `InventoryReservationFailed`, `InventoryReplenished`|
+|Publishes|`InventoryReserved`, `InventoryReservationFailed`, `InventoryReplenished`, `InventoryReleased` (compensating release — named in §12.2's diagram, previously missing from this row and the Event Catalog; see ADR-0007)|
 |Consumes|`OrderCancelled` (release), `OrderCompensationTriggered` (release)|
 |Boundary Rationale|Isolated so oversell logic (the highest-contention code in the whole system) can be scaled, locked, and load-tested independently of everything else.|
 
@@ -178,8 +178,8 @@ Each service below follows the same template: **Responsibility → API → Datab
 
 |Service|API surface|DB|Key Events Published|Key Events Consumed|
 |---|---|---|---|---|
-|Identity|`/auth/login`, `/auth/refresh`|PostgreSQL|`UserRegistered`, `SessionCreated`|—|
-|User|`/users/{id}`|PostgreSQL → MongoDB read|`UserProfileUpdated`|`UserRegistered`|
+|Identity|`/auth/login`, `/auth/refresh`|PostgreSQL|`UserRegistered`, `SessionCreated`, `UserAccountUpdated` (email/name change — see ADR-0006)|—|
+|User|`/users/{id}`|PostgreSQL → MongoDB read|`UserProfileUpdated`|`UserRegistered`, `UserAccountUpdated` (see ADR-0006)|
 |Product|`/products/{id}`|PostgreSQL → MongoDB read|`ProductCreated`, `ProductPriceChanged`|—|
 |Category|`/categories`|PostgreSQL|`CategoryUpdated`|—|
 |Search|`/search` (query only)|MongoDB / OpenSearch|—|`ProductCreated`, `ProductPriceChanged`|
@@ -188,12 +188,12 @@ Each service below follows the same template: **Responsibility → API → Datab
 |Pricing|`/pricing/quote`|PostgreSQL|`PriceQuoteIssued`|`ProductPriceChanged`|
 |Promotion|`/promotions/active`|PostgreSQL → Redis cache|`PromotionActivated`|—|
 |Wishlist|`/wishlist`|MongoDB|`WishlistPriceAlertTriggered`|`ProductPriceChanged`|
-|Review|`/reviews`|PostgreSQL → MongoDB read|`ReviewSubmitted`|`OrderDelivered`|
-|Notification|(consumer only, no public API)|PostgreSQL (audit)|`NotificationSent`|almost every event in catalog|
+|Review|`/reviews`|PostgreSQL → MongoDB read|`ReviewSubmitted`|`OrderDelivered` (canonical name — see ADR-0005)|
+|Notification|(consumer only, no public API)|PostgreSQL (audit)|`NotificationSent`|All `order.*` and `payment.*` routed events (per §9's manifest), plus `WishlistPriceAlertTriggered`, `UserRegistered`, `OrderDelivered` — resolved scope, see ADR-0003; §10 lists the full resolved consumer set per event|
 |Shipping|`/shipments`|PostgreSQL|`ShipmentDispatched`|`OrderConfirmed`|
 |Delivery Tracking|`/tracking/{id}`|MongoDB|`DeliveryStatusUpdated`|carrier webhook → internal event|
-|Recommendation|`/recommendations/{userId}`|MongoDB|—|`OrderCompleted`, clickstream events|
-|Analytics|(ingestion only)|Kafka topics → warehouse|—|all events (fan-in)|
+|Recommendation|`/recommendations/{userId}`|MongoDB|—|`OrderDelivered` (see ADR-0005 — supersedes the BRD's earlier "OrderCompleted" naming), clickstream events|
+|Analytics|(ingestion only)|Kafka topics → warehouse|—|All events, full fan-in — resolved scope, see ADR-0004; §10 lists Analytics as a consumer on every row|
 |Admin|`/admin/*` (RBAC-gated)|PostgreSQL|`AdminActionPerformed`|—|
 
 ### 5.5 Service Boundary Diagram
@@ -389,22 +389,33 @@ Application startup reads a JSON manifest and declares all RabbitMQ topology ide
 
 |Event|Publisher|Consumer(s)|Payload (key fields)|Retry|DLQ Strategy|
 |---|---|---|---|---|---|
-|`OrderCreated`|Order|Payment, Analytics|orderId, userId, items, total|3x exponential|to `order.dlq`, manual replay tool|
-|`OrderConfirmed`|Order|Shipping, Notification|orderId, address|3x|`order.dlq`|
-|`OrderCancelled`|Order|Inventory, Coupon|orderId, reason|3x|`order.dlq`|
-|`InventoryReserved`|Inventory|Order|orderId, sku, qty|2x|`inventory.dlq`|
-|`InventoryReservationFailed`|Inventory|Order, Cart|orderId, sku|2x|`inventory.dlq`|
-|`PaymentCompleted`|Payment|Order, Analytics|orderId, txnId|5x (money-critical)|`payment.dlq`, paged on-call|
-|`PaymentFailed`|Payment|Order|orderId, reason|5x|`payment.dlq`, paged on-call|
-|`ShipmentDispatched`|Shipping|Order, Notification, Tracking|orderId, carrier, trackingId|3x|`shipping.dlq`|
-|`DeliveryStatusUpdated`|Delivery Tracking|Notification, Analytics|trackingId, status|3x|`tracking.dlq`|
-|`ProductCreated`|Product|Search, Recommendation|sku, attributes|3x|`catalog.dlq`|
-|`ProductPriceChanged`|Pricing|Search, Wishlist|sku, oldPrice, newPrice|3x|`catalog.dlq`|
+|`OrderCreated`|Order|Payment, Analytics, Notification|orderId, userId, items, total|3x exponential|to `order.dlq`, manual replay tool|
+|`OrderConfirmed`|Order|Shipping, Notification, Analytics|orderId, address|3x|`order.dlq`|
+|`OrderCancelled`|Order|Inventory, Coupon, Notification, Analytics|orderId, reason|3x|`order.dlq`|
+|`OrderCompensationTriggered`|Order|Inventory, Notification, Analytics|orderId, reason|3x|`order.dlq`|
+|`OrderDelivered`|Order|Recommendation, Review, Notification, Analytics|orderId, deliveredAt|3x|`order.dlq`|
+|`InventoryReserved`|Inventory|Order, Analytics|orderId, sku, qty|2x|`inventory.dlq`|
+|`InventoryReservationFailed`|Inventory|Order, Cart, Analytics|orderId, sku|2x|`inventory.dlq`|
+|`InventoryReleased`|Inventory|Order, Analytics|orderId, sku, qty|2x|`inventory.dlq`|
+|`InventoryReplenished`|Inventory|Analytics|sku, qtyAdded, warehouseId|2x|`inventory.dlq`|
+|`PaymentCompleted`|Payment|Order, Analytics, Notification|orderId, txnId|5x (money-critical)|`payment.dlq`, paged on-call|
+|`PaymentFailed`|Payment|Order, Notification, Analytics|orderId, reason|5x|`payment.dlq`, paged on-call|
+|`RefundIssued`|Payment|Order, Notification, Analytics|orderId, refundId, amount|5x (money-critical)|`payment.dlq`, paged on-call|
+|`ShipmentDispatched`|Shipping|Order, Notification, Tracking, Analytics|orderId, carrier, trackingId|3x|`shipping.dlq`|
+|`DeliveryStatusUpdated`|Delivery Tracking|Order (terminal status only), Notification, Analytics|trackingId, status|3x|`tracking.dlq`|
+|`ProductCreated`|Product|Search, Recommendation, Analytics|sku, attributes|3x|`catalog.dlq`|
+|`ProductPriceChanged`|Pricing|Search, Wishlist, Analytics|sku, oldPrice, newPrice|3x|`catalog.dlq`|
 |`ReviewSubmitted`|Review|Product (rating recalc), Analytics|orderId, sku, rating|2x|`review.dlq`|
 |`CouponRedeemed`|Coupon|Order, Analytics|code, orderId|2x|`coupon.dlq`|
 |`NotificationSent`|Notification|Analytics|userId, channel, status|1x (fire-and-forget audit)|`notification.dlq`|
+|`CartCheckedOut`|Cart|Analytics (funnel/conversion tracking)|cartId, userId, items|2x|`cart.dlq`|
+|`WishlistPriceAlertTriggered`|Wishlist|Notification, Analytics|userId, sku, oldPrice, newPrice|2x|`wishlist.dlq`|
+|`AdminActionPerformed`|Admin|Analytics (audit trail)|adminId, action, entityId|1x (fire-and-forget audit)|`admin.dlq`|
+|`UserRegistered`|Identity|User, Notification, Analytics|userId, email|3x|`identity.dlq`|
+|`SessionCreated`|Identity|Analytics|userId, sessionId|2x|`identity.dlq`|
+|`UserAccountUpdated`|Identity|User|userId, email, displayName|2x|`identity.dlq`|
 
-_Money-moving events (`Payment*`) get the highest retry budget and human paging; catalog/search events get looser retry because staleness is tolerable for seconds._
+_Money-moving events (`Payment*`, `RefundIssued`) get the highest retry budget and human paging; catalog/search events get looser retry because staleness is tolerable for seconds. This table was extended to close two categories of gap found during platform review (see `kart-platform/docs/adr/0002-*.md` through `0007-*.md`): (1) events named in a service's own row (§5.4) that had no Event Catalog entry at all — `OrderCompensationTriggered`, `InventoryReleased`, `InventoryReplenished`, `RefundIssued`, `CartCheckedOut`, `WishlistPriceAlertTriggered`, `AdminActionPerformed`, `UserRegistered`, `SessionCreated` — and (2) two genuinely ambiguous consumer-scope questions (Notification's actual consumed-event set, Analytics' actual ingestion scope) that were resolved rather than left to each service to guess independently. `OrderDelivered` and `UserAccountUpdated` are new events, not previously named anywhere in the BRD — see ADR-0005 and ADR-0006 respectively for why they were needed._
 
 ---
 
@@ -466,6 +477,8 @@ sequenceDiagram
     Shipping-->>Order: ShipmentDispatched
     Order->>Order: Mark OrderConfirmed
 ```
+
+_Integration style note (resolves the apparent sync-call reading of this diagram — see ADR-0002 in `kart-platform`): every arrow above is async pub/sub over the message bus, not synchronous RPC — the same request/reply notation is used for the Payment step too, and Payment is unambiguously stated as async in §5.1's Dependencies row, so the notation itself carries no sync/async meaning, only causal order. `OrderConfirmed` is published as soon as Payment clears (before Shipping has actually created anything) — Shipping is an async consumer of `OrderConfirmed`, exactly as §5.4/§10 state — and `ShipmentDispatched` flows back to Order purely as an informational status update. "Order->>Order: Mark OrderConfirmed" as the last line is diagram shorthand for "the happy path completed end-to-end," not a literal publish-order requirement that confirmation waits on shipment creation._
 
 ### 12.2 Order Saga — Failure & Compensation Flow
 
@@ -619,11 +632,37 @@ Nginx sits in front of the gateway for TLS termination, static asset serving, an
 
 |Layer|Control|
 |---|---|
-|AuthN|OAuth2 Authorization Code flow (web/mobile clients), Client Credentials (service-to-service)|
-|AuthZ|JWT with scoped claims, validated at gateway + re-checked at service for sensitive operations|
+|AuthN|OAuth2 Authorization Code flow (web/mobile clients), Client Credentials (service-to-service), SSO via OIDC/SAML federation (see §24.2)|
+|AuthZ|JWT with scoped claims, validated at gateway + re-checked at service for sensitive operations; RBAC role claims embedded in the token, enforced platform-wide (see §24.1)|
 |Token Lifecycle|Short-lived access tokens (~15 min), rotating refresh tokens, revocation list for logout|
 |Encryption|TLS 1.3 in transit everywhere; AES-256 at rest for PII columns; payment data never stored — tokenized by the gateway provider|
 |API Security|Input validation, rate limiting, mandatory idempotency keys on all money-moving POSTs|
+
+### 24.1 Cross-Cutting RBAC Model
+
+RBAC is a platform-wide concern, not an Admin Service–local feature — every one of the 20 services trusts the same role claims rather than maintaining its own permission table. Identity Service is the single issuer of roles; every other service is a **consumer** of the claim, never a second source of truth for "who can do what."
+
+|Role|Scope|Example Grant|
+|---|---|---|
+|Customer|Own resources only (`userId` match)|Manage own cart, orders, wishlist|
+|Support Agent|Read + limited write across customer-facing services|View any order, issue a refund up to a capped amount|
+|Admin|Full back-office operations|Catalog management, coupon issuance, user suspension — all `/admin/*` routes|
+|Partner API|Scoped, non-interactive|Bulk catalog upload, order status webhook — client-credentials flow only|
+
+- **Issuance**: Identity Service resolves a user/service-principal to a role set at token-mint time and embeds it as a scoped claim in the JWT (`roles: [...]`, `scopes: [...]`) — this is the same JWT already described in §24 AuthZ, not a separate token.
+- **Enforcement**: checked twice — coarse-grained at the API Gateway (§18, reject before the request reaches a service) and fine-grained again at the owning service (e.g., "Support Agent can refund, but only up to $X" is a business rule Payment Service enforces itself, since the gateway cannot know the order total).
+- **Why not per-service role tables**: with 20 independently-deployed services, a locally-defined role table per service silently drifts (Admin's "Support" role and Order's "Support" role diverge in meaning within a year). One issuer + one claim shape is what makes RBAC auditable across the whole platform.
+
+### 24.2 SSO / Identity Federation
+
+Two distinct SSO needs, both fronted by Identity Service so downstream services never talk to an external IdP directly:
+
+|Audience|Federation Protocol|Why|
+|---|---|---|
+|Admin / back-office users|SAML 2.0 or OIDC against the org's enterprise IdP (Okta/Azure AD/Google Workspace)|Back-office staff already have a corporate identity; forcing a separate Kart-only password is both worse security (one more credential to phish/leak) and worse UX|
+|Customers|OIDC social login (Google/Apple/etc.) alongside native email/password|Reduces signup friction; still lands on the same Identity Service token issuance path, so RBAC/AuthZ downstream is identical regardless of how the user authenticated|
+
+Federation is terminated entirely at Identity Service — it exchanges the external IdP's assertion/token for Kart's own short-lived JWT (per §24 Token Lifecycle) carrying Kart-native role claims. No other service ever validates a SAML assertion or holds an external IdP client secret; this keeps the PCI/compliance-relevant blast radius (§5.3 Boundary Rationale) and the IdP integration surface both contained to one service.
 
 ---
 

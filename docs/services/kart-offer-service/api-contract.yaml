@@ -1,0 +1,132 @@
+# doc_type: api-contract
+# service: kart-offer-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source: docs/services/kart-offer-service/ddd-model.md
+#
+# Publishing a stable copy to kart-shared is deferred until that repo
+# exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-offer-service API
+  version: 1.0.0
+  description: >
+    Coupon validation/redemption, pricing quotes, and active promotions.
+    Merge of BRD Coupon/Pricing/Promotion services per ADR-0001.
+
+paths:
+  /v1/coupons/validate:
+    post:
+      operationId: validateCoupon
+      summary: Validate a coupon code against redemption rules without redeeming it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [couponCode, userId, cartTotal]
+              properties:
+                couponCode: { type: string }
+                userId: { type: string }
+                cartTotal: { $ref: '#/components/schemas/Money' }
+      responses:
+        '200':
+          description: Validation result (does not redeem).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  reason: { type: string, nullable: true, description: "Why invalid, if valid=false" }
+
+  /v1/coupons/redeem:
+    post:
+      operationId: redeemCoupon
+      summary: Redeem a coupon for an order. Money-adjacent — idempotency required.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [couponCode, userId, orderId]
+              properties:
+                couponCode: { type: string }
+                userId: { type: string }
+                orderId: { type: string }
+      responses:
+        '200':
+          description: Redeemed. Publishes CouponRedeemed.
+        '409':
+          description: Redemption limit exceeded, or already redeemed for this order.
+
+  /v1/pricing/quote:
+    post:
+      operationId: getPricingQuote
+      summary: Compute a price quote for a cart/checkout context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items, currency]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      sku: { type: string }
+                      quantity: { type: integer }
+                currency: { type: string, example: USD }
+      responses:
+        '200':
+          description: PricingQuote issued. Publishes PriceQuoteIssued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quoteId: { type: string }
+                  total: { $ref: '#/components/schemas/Money' }
+                  expiresAt: { type: string, format: date-time, description: "15 min TTL per ddd-model.md Modeling Decision #2" }
+
+  /v1/promotions/active:
+    get:
+      operationId: getActivePromotions
+      summary: List currently active promotion campaigns.
+      parameters:
+        - name: sku
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Active campaigns, best-discount-wins already resolved server-side if `sku` is provided.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    campaignId: { type: string }
+                    window: { type: object, properties: { startsAt: { type: string, format: date-time }, endsAt: { type: string, format: date-time } } }
+
+components:
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
