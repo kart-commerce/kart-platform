@@ -1140,10 +1140,12 @@ graph LR
 | **CQRS** | Write model is always PostgreSQL, source of truth; read model always rebuildable from write model + event log; never write directly to a read model outside a projection consumer |
 | **Naming** | Services: `kart-<noun>-service`; events: `<Entity><PastTenseVerb>` (e.g., `OrderCreated`); routing keys: `service.entity.action` |
 | **Folder Structure** | Clean Architecture layers (`Api/Application/Domain/Infrastructure`) + Vertical Slices inside `Application` (one folder per use case, not one folder per technical layer) |
+| **Clean Code / SOLID / Design Patterns** | SOLID as the non-negotiable baseline; constructor-injected dependencies only, no service locators; a reach-for-this pattern table (Strategy/Factory/Decorator/Specification/Mediator/Repository/Adapter) tied to the problem shape, not applied by default; DRY only after a third duplicate, never from two |
 | **Logging** | Structured JSON only; mandatory fields: `traceId`, `service`, `level`, entity id relevant to the operation |
 | **Observability** | RED metrics per service; W3C Trace Context propagated through HTTP and message headers; 100% trace coverage on the order path |
 | **Versioning** | Semantic Versioning for all published packages/contracts; API versioned via URL prefix (`/v1/`) |
 | **Error Handling** | Result/Either pattern for domain errors, exceptions reserved for truly exceptional (infra) failures; no silent catch-and-continue |
+| **Resilience** | Circuit breaker on every synchronous outbound call; bounded exponential-backoff retry on idempotent operations only; bulkhead isolation per dependency; explicit timeout budgets; degrade gracefully rather than cascade |
 | **Validation** | FluentValidation (or equivalent) at the API boundary; domain invariants enforced in the aggregate, never only at the edge |
 | **Caching** | Cache-aside default; write-through only when staleness is provably unacceptable (pricing/promotion flags); explicit invalidation on the relevant domain event, never TTL-only for price-sensitive data |
 | **Security** | TLS everywhere; JWT validated at gateway + re-checked at service for sensitive scopes; no plaintext secrets, K8s Secrets + external secret manager |
