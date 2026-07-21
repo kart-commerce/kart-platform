@@ -161,6 +161,47 @@ graph LR
 | `kart-<name>-service` × 20 | One per BRD service, each Clean Architecture + Vertical Slice, own DB, own pipeline | Yes |
 | `kart-api-gateway` | Gateway routing/rate-limit config, BFF if needed | Yes |
 
+### 2.5 GitHub Organization Structure (Free-Tier Operational Guide)
+
+GitHub Free (personal or organization) has unlimited public **and** private repos, so repo *count* is never the constraint — the constraint is discipline: 24+ repos with no shared structure become unnavigable. This section is the concrete, buildable answer.
+
+**Where repos live — two namespaces, not one:**
+
+| Namespace | Holds | Why separate |
+|---|---|---|
+| A dedicated GitHub **Organization** (e.g. `kart-commerce`) | Every Kart-specific repo: `kart-platform`, `kart-requirements`, `kart-shared`, `kart-infra`, `kart-devops`, `kart-api-gateway`, all 18 `kart-<name>-service` repos | This is the product's home — same reason a real company puts its product repos under a company org, not an individual's personal account |
+| The personal account (or a separate, neutral org later) | `agent-reusables` | It explicitly claims to be reusable "across every project, not just one product" (its own README) — housing it inside the Kart org would misrepresent it as Kart-specific and contradicts the same reusable-vs-business separation this whole platform is built on |
+
+Creating an organization is free and gives you, at zero cost: an org-wide profile page, unlimited collaborators (useful the moment this stops being solo), and the org-wide features below — none of this is available to the same degree spread across unrelated personal-account repos.
+
+**Naming — one rule, applied without exception:** `kart-<noun>-service` for every deployable microservice (already established in `agent-reusables/naming-conventions.md`'s generic `<org>-<noun>-service` pattern); everything else gets a `kart-<role>` name stating what it *is*, not what it does internally. All lowercase, hyphen-separated, no abbreviations that aren't already used elsewhere in this platform's docs.
+
+**Complete repository list:**
+
+| Repo | Role | Phase |
+|---|---|---|
+| `kart-platform` | Docs, ADRs, standards pointers, agent defs, pipeline registry | 0 |
+| `kart-requirements` | BRD source of truth | 0 |
+| `kart-shared` | Versioned event schemas, OpenAPI contracts, common libs | 0 |
+| `kart-infra` | Terraform/Helm/K8s bootstrap | 0 |
+| `kart-devops` | Reusable CI/CD workflows | 0 |
+| `kart-identity-service`, `kart-product-service`, `kart-inventory-service`, `kart-cart-service`, `kart-order-service`, `kart-payment-service`, `kart-offer-service`, `kart-api-gateway` | Order-critical-path services + gateway | 1 |
+| `kart-search-service`, `kart-notification-service`, `kart-shipping-service`, `kart-delivery-tracking-service`, `kart-user-service`, `kart-category-service` | Fulfillment & discovery services | 2 |
+| `kart-review-service`, `kart-wishlist-service`, `kart-recommendation-service`, `kart-analytics-service`, `kart-admin-service` | Growth & ops services | 3 |
+
+**Free-tier professional polish, all zero-cost:**
+
+- **`.github` repo** (a repo literally named `.github` at the org root) — org-wide default issue templates, PR template, `CODEOWNERS`, `CONTRIBUTING.md`, `SECURITY.md`. Any repo without its own copy inherits these automatically — write once, apply to all 24+ repos instead of duplicating per repo.
+- **Org profile README** — a repo named exactly the same as the org, with a `README.md`, renders as the org's public landing page (architecture summary, link to `kart-platform`'s docs, phase status).
+- **Topics** on every repo (`kart`, `microservice`, `dotnet`, `phase-1`, plus a domain tag like `order-domain`) — free, and the only built-in way to filter/browse 24 repos by category from the org's repo list.
+- **Branch protection + required PR review + required status checks** on every repo's `main` — enforces `git-workflow.md`'s "no direct commits to `main`" as a platform rule, not a promise.
+- **`CODEOWNERS` per repo** — routes review requests automatically; pairs with the Quality Gate table's "Human approval required regardless of agent verdict" rule.
+- **Dependabot** — free on every repo, catches vulnerable dependencies without waiting for a dedicated security tooling budget.
+- **A single org-level Project (board)** — spans issues across all repos, which is what actually makes the Ticket/Sprint-Planner Agent output (§8.2 #7-8) usable at 24-repo scale instead of checking each repo's issue tab separately.
+- **Reusable workflows via `kart-devops`** (`workflow_call`) — already planned in §2.4; this is the free-tier mechanism that avoids copy-pasting the same CI YAML into 24 repos.
+
+**Visibility:** given this platform's own stated purpose ("doubles as interview prep," §1.2), default every repo to **public** — free either way on GitHub, but public also means Dependabot alerts and secret scanning run automatically (secret scanning push protection is a paid Advanced Security feature on private repos, free on public ones) and the org becomes a visible portfolio artifact. Flip a repo private only if it has a concrete reason (e.g., before it's presentable) — decide this per repo, not as a blanket default.
+
 ---
 
 ## 3. `kart-platform` Repository — Complete Design

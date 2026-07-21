@@ -1,7 +1,7 @@
 ---
 doc_type: edge-cases
 service: kart-order-service
-status: pending-approval
+status: approved
 generated_by: edge-case-analyzer-agent
 source: docs/services/kart-order-service/requirement-spec.md
 ---
@@ -67,3 +67,33 @@ source: docs/services/kart-order-service/requirement-spec.md
   - Chosen: route client-initiated cancel through the same Saga/compensation state machine.
   - Why: Order's Boundary Rationale (BRD §5.1) establishes it as the *sole* driver of cross-service business transactions — a second, separate cancellation code path would violate that single-writer principle and reopen the double-compensation risk already identified in the Payment-success/Shipping-failure edge case above.
   - Trade-off accepted: a user-facing cancel click may not take effect instantly if the saga is mid-step — it must wait for the current step to resolve before applying, versus an out-of-band cancel that force-writes a `Cancelled` status immediately.
+
+## Edge Case: `DeliveryStatusUpdated` Terminal Event Arriving Before Order Reaches `Shipped`
+
+- **What happens:** Order consumes `DeliveryStatusUpdated`'s terminal "delivered" value for an order whose own state machine has not yet advanced to `Shipped` — e.g. the terminal delivery event arrives before Order has processed `ShipmentDispatched` for that order, or `ShipmentDispatched` itself is delayed/lost.
+- **Why it happens:** requirement-spec's "Terminal delivery event" section (Saga Orchestration, ADR-0005) establishes Delivery Tracking as a genuinely independent async publisher, distinct from and not gated on Order's own `ShipmentDispatched` consumption from Shipping — nothing in the spec requires Delivery Tracking's pipeline for a shipment to wait on Order having already processed `ShipmentDispatched` for the same order, so the two inbound events race with no ordering guarantee between them.
+- **Solutions available (3):** state-guard the consumer — if the order is not yet in `Shipped` when the terminal event arrives, do not apply it; NACK so the broker redelivers, or requeue with backoff, until Order's own state catches up · park/buffer the event in a delayed-retry queue and reapply once `Shipped` is reached · relax ordering and allow a direct jump straight to `Delivered` regardless of current state.
+- **Decision (3-5 bullets max):**
+  - Chosen: state-guard the consumer (option 1) — reject/requeue the event until the order is actually in `Shipped`, never advance the state machine ahead of it.
+  - Why: requirement-spec's "Legal state transitions only" Domain Invariant (§4) is explicit that no transition may skip states, and the same section calls out `Shipped → Delivered` as the one transition driven solely by this consumption — admitting a direct skip here would be the one place that invariant is silently violated by the very event that's supposed to respect it.
+  - Trade-off accepted: unresolved bound — how long Order should hold/retry the event before treating it as genuinely stuck (rather than merely racing) depends on the per-step timeout budget requirement-spec Open Question 6 leaves undefined; escalated together with that question rather than picked arbitrarily here, same posture as the "Orphaned/Stuck Saga Detection" edge case above.
+
+## Edge Case: Duplicate/Redelivered `DeliveryStatusUpdated` Terminal Event
+
+- **What happens:** a duplicate or redelivered `DeliveryStatusUpdated` terminal "delivered" event arrives for an order already in the `Delivered` state, risking a second `OrderDelivered` publish for the same order.
+- **Why it happens:** requirement-spec's Domain Invariants section (§4, "Idempotent event consumption") states directly that "a duplicate or replayed terminal-status delivery must not re-publish a second `OrderDelivered` for the same order," extending the platform's general at-least-once/idempotent-consumer NFR (§3 Reliability row) to this newly-added consumed event.
+- **Solutions available (2):** reuse the dedicated idempotency-key/dedup-table pattern used elsewhere on the platform (e.g. Payment's `idempotency_keys` table, per the "Duplicate Order Submission" edge case above) · a simpler state-guard — since `Delivered` is terminal for this transition with no other Order-Saga-driven transition out of it, check the order's current state before publishing and treat "already `Delivered`" as an unconditional no-op.
+- **Decision (3-5 bullets max):**
+  - Chosen: state-guard against current order state (option 2), not a dedicated idempotency-key table.
+  - Why: unlike `PaymentCompleted`/`PaymentFailed`, which need dedup against replay at multiple *non-terminal* points mid-Saga, `Shipped → Delivered` per requirement-spec's "Terminal delivery event" section has exactly one trigger and one destination state that nothing else in the state machine writes to — once the order is `Delivered`, any further terminal `DeliveryStatusUpdated` for it is unconditionally a no-op, so a full key-tracking table adds no protection a plain state check doesn't already give.
+  - Trade-off accepted: this specific guard is Order-specific to this transition and doesn't generalize back to the harder mid-Saga idempotency cases above — it only works because `Delivered` has no valid onward Order-Saga transition (refunds are handled by the separate refund saga per requirement-spec §2, not by this state machine).
+
+## Edge Case: Client Cancel Request Racing a Terminal `DeliveryStatusUpdated`
+
+- **What happens:** a client calls `POST /orders/{id}/cancel` at or after the point a terminal `DeliveryStatusUpdated` is in flight or has just been consumed for the same order — i.e. cancellation is requested once physical delivery has already happened or is in the process of being recorded as complete.
+- **Why it happens:** the existing "Client Cancel Request Racing an In-Flight Saga" edge case above resolves cancel-vs-Saga races generally by routing cancel through the same state machine as single writer, but that resolution doesn't say what the state-guard should decide when the competing transition is `Shipped → Delivered` specifically — requirement-spec Open Question 2 (state-machine edge transitions) is explicit that it remains open whether `Cancelled` is reachable from `Shipped` at all, and that question is now compounded by an async terminal event that can win or lose the race against the cancel request.
+- **Solutions available (2, not a pick between engineering equivalents — see Decision):** reject `POST /orders/{id}/cancel` outright once the order is in `Shipped` (or once a terminal `DeliveryStatusUpdated` is already being processed), forcing the client into a separate returns/refund flow instead · allow the cancel call to remain legal from `Shipped` and let the state-guard's tie-break decide — e.g. an in-flight terminal `DeliveryStatusUpdated` always wins because physical delivery already happened, cancellation is moot.
+- **Decision (3-5 bullets max):**
+  - Chosen: **escalated, unresolved** — not decided here.
+  - Why not decided here: requirement-spec Open Question 2 has already flagged that the BRD gives no basis to determine whether `Cancelled` is reachable from `Shipped`/`Paid` at all; picking a tie-break for this race would silently answer that open product question as a side effect of an engineering pattern, which is exactly the kind of business/policy call the "Orphaned/Stuck Saga Detection" edge case above already treats as escalate-don't-pick, per this agent's own failure-condition guidance for genuine business judgment calls.
+  - Trade-off accepted: N/A — pending human decision; carried forward together with requirement-spec Open Question 2 for sign-off, since the two questions can't be resolved independently of each other.
