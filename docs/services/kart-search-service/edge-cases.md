@@ -16,7 +16,7 @@ source: docs/services/kart-search-service/requirement-spec.md
 - **Decision:**
   - Chosen: async consumer over RabbitMQ with a tuned OpenSearch refresh interval; no synchronous write path
   - Why: BRD §2.2 explicitly forces the eventual-consistency conversation for Search, and a synchronous write would violate Search's read-optimized service boundary
-  - Trade-off accepted: an unavoidable staleness window whose exact bound is unresolved (requirement-spec Open Question 1 has no numeric SLA yet)
+  - Trade-off accepted: a bounded staleness window is unavoidable — now quantified as P95 < 5s / P99 < 15s (requirement-spec NFR §3, Open Question 1, resolved), tuned via the OpenSearch refresh interval and consumer batch size; if real-world lag exceeds this bound under load, that's an Architecture Agent capacity question, not a reopening of this decision
 
 ## Edge Case: Index Rebuild During High Write Volume
 
@@ -44,6 +44,16 @@ source: docs/services/kart-search-service/requirement-spec.md
 - **Why it happens:** Server-side faceted aggregation (BRD §17) has no stated cardinality bound (requirement-spec Open Question 3), so nothing stops a query from requesting facet breakdowns at full catalog scale.
 - **Solutions available (3):** hard cap on facet count/values per query · precomputed/cached facet buckets for common filter combinations on a TTL · query-time timeout that degrades to partial facets instead of failing the request
 - **Decision:**
-  - Chosen: hard cap on facet count/values per query plus a query-time timeout that degrades to partial/omitted facets rather than failing the whole response
-  - Why: keeps `/search` within its latency NFR in the worst case, and degrading gracefully matches the platform's stated no-cascading-failure principle (BRD §3 Fault Tolerance row)
-  - Trade-off accepted: the exact cap value is a business call, not an engineering default — left unresolved and escalated, consistent with requirement-spec Open Question 3
+  - Chosen: hard cap on facet count/values per query (max 5 concurrent facet filters, max 100 returned value-buckets per facet) plus a 300ms query-time budget — inside the P99 < 400ms latency NFR (requirement-spec §3) — after which the query degrades by dropping the least-selective facet filter(s) first (highest-cardinality facet dropped before lower-cardinality ones) and returns partial results with a `truncated: true` flag, rather than failing the whole request
+  - Why: keeps `/search` within its latency NFR in the worst case, and degrading gracefully matches the platform's stated no-cascading-failure principle (BRD §3 Fault Tolerance row); dropping least-selective facets first preserves the filters most likely to narrow results meaningfully for the user
+  - Trade-off accepted: this closes requirement-spec Open Question 3 as a single-service engineering default rather than a business/product call — the specific numbers (5 filters, 100 buckets, 300ms) are this spec's own defensible baseline, not a BRD-stated figure, and may need retuning once the Architecture Agent load-tests against the real 100M-SKU index; retuning the constant is a normal refinement, not reopening this decision. A truncated response is a worse UX than full facets, accepted in exchange for a bounded latency guarantee
+
+## Edge Case: Discontinued Product Still Returned by Search
+
+- **What happens:** A product that has been discontinued/delisted upstream keeps appearing in `/search` results because Search's index has no removal signal for it.
+- **Why it happens:** BRD §5.4/§10 name only `ProductCreated` and `ProductPriceChanged` as Search's consumed events — no removal/discontinuation event existed in the BRD's own Event Catalog (requirement-spec Open Question 4, now resolved: `kart-product-service` has proposed a `ProductDiscontinued` event, requirement-spec §2/§5).
+- **Solutions available (3):** consume `ProductDiscontinued` and hard-delete the document from the index · consume `ProductDiscontinued` and soft-remove it (flag as unavailable/excluded from default query results, document retained) · ignore the gap and rely on a periodic full reconciliation sweep against Product's read model
+- **Decision:**
+  - Chosen: consume `ProductDiscontinued` and soft-remove — flag the indexed document `available: false` and exclude it from default `/search` result sets (still retrievable by direct SKU lookup/admin tooling if ever needed), rather than a hard delete
+  - Why: mirrors the write-side choice `kart-product-service` already made for the same event (soft-delete via a `status` field, not a hard delete, to keep history replayable — see its `edge-cases.md`'s "Discontinued/orphaned variant" edge case) — keeping Search's own removal semantics consistent with the upstream signal's own semantics avoids a hard-delete-vs-soft-delete mismatch across the two services describing the same lifecycle transition. It also reuses the same version/timestamp-guard write path already decided for the "Out-of-Order Event Consumption" edge case above, rather than introducing a second removal code path
+  - Trade-off accepted: soft-removed documents remain in the index and consume storage/shard capacity indefinitely unless a separate periodic purge job is introduced later — acceptable because storage cost is cheap relative to the correctness risk of a hard delete racing an out-of-order in-flight `ProductPriceChanged` for the same SKU (which would silently resurrect a discontinued product with a mismatched exclusion flag)

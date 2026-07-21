@@ -1,0 +1,75 @@
+---
+doc_type: architecture
+service: kart-identity-service
+status: pending-approval
+generated_by: architecture-agent
+source: docs/services/kart-identity-service/requirement-spec.md, docs/services/kart-identity-service/edge-cases.md, docs/services/kart-identity-service/design-decisions.md
+---
+
+# Architecture: kart-identity-service
+
+## Boundary Rationale
+
+`kart-identity-service` is the bounded context that answers "who is this, what can they do, and is their token still good" — AuthN, token issuance, session lifecycle, MFA, RBAC role/claim issuance, and SSO/federation, all in one cohesive domain (BRD §2.1 item 1, §24.1, §24.2; requirement-spec.md §1). It is the platform's **single token issuer** and **sole point of contact with any external IdP** (Domain Invariants, requirement-spec.md §4) — no other service mints a JWT, maintains its own role table, or holds an external IdP client secret. This is a strict single-issuer/single-source-of-truth boundary, not a convenience split: BRD §24.1 states outright that a second, independently-maintained role/permission table anywhere else on the platform would be "auditable" only in name.
+
+The boundary is deliberately split from **User Service** along a field-ownership line, not duplicated (ADR-0006): Identity owns login-credential-adjacent fields (login email, display name at auth time) as their source of truth and publishes `UserAccountUpdated` when they change; User owns the broader profile (addresses, preferences) and keeps a denormalized, eventually-consistent copy of those two fields. Identity never models a full user profile, and User never re-derives or overrides Identity's copy of login email/display name.
+
+The boundary is also split from **Admin Service** along a coarse/fine-grained line (ADR-0010, and confirmed from the other side by `kart-admin-service/architecture.md` §"Dependencies"): Identity is the sole owner of the coarse question "does this user hold the `Admin` role at all," resolved once at token-mint time; Admin Service owns and consults, on every request, the separate and narrower question "which of the four back-office categories can this `Admin`-role holder actually exercise" (`admin_permission_grants`). Identity never inspects Admin's fine-grained grants, and Admin never re-implements Identity's role resolution or revocation-list check.
+
+**Why this is more foundational than the order-path critical path, not merely adjacent to it:** every authenticated request across all platform services is gated by the Gateway's JWT validation (BRD §18), and every service's RBAC resolution now runs through Identity at mint time (BRD §24.1). Requirement-spec.md §3 already assigns Identity the platform's highest availability tier (99.99%) on this basis — see "Redundancy / Availability Architecture" below for how that target is met at the infrastructure level, resolving what that spec explicitly left to this stage.
+
+## Dependencies
+
+| Direction | Peer | Mechanism | Type | Notes |
+|---|---|---|---|---|
+| Inbound (client, via API Gateway) | Customer / Support Agent / Admin / Partner API clients | `POST /auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/mfa/verify`, `/auth/password/reset-initiate`, `/auth/password/reset-confirm` | **Sync** (REST) | Auth critical path — P95 < 150ms / P99 < 400ms read, P95 < 300ms write (requirement-spec.md §3) |
+| Inbound (browser redirect) | Enterprise IdP (Okta / Azure AD / Google Workspace) | SAML ACS / OIDC callback endpoint | **Sync**, inline redirect-response — cannot be deferred/queued (design-decisions.md) | Federation terminates exclusively at Identity (BRD §24.2); per-IdP circuit breaker + bulkhead + timeout budget (design-decisions.md, "Resilience Pattern for External IdP Calls") |
+| Inbound (browser redirect) | Social IdP (Google/Apple) | OIDC callback endpoint | **Sync**, inline | Resolves to `Customer` role only, never elevated (requirement-spec.md §2, Q7) — own bulkhead group, isolated from enterprise federation |
+| Inbound (service-to-service) | **Admin Service** | `POST /internal/users/{userId}/lock`, `POST /internal/users/{userId}/unlock` | **Sync** (internal REST, client-credentials, `Admin`-scoped only) | Admin is the caller, Identity the owning/callee service (ADR-0010). Matches the outbound edge already recorded from Admin's side in `kart-admin-service/architecture.md`'s Dependencies table — no divergence between the two docs. |
+| Inbound (edge, low-frequency) | API Gateway | JWKS / public-key retrieval for local JWT signature verification | **Sync** (REST), but cached and infrequent — **not** a per-request round trip | RS256 asymmetric signing (design-decisions.md, "JWT Signing Algorithm") — the Gateway validates every request's JWT locally against a cached public key; this is the only Gateway→Identity coupling and it is explicitly kept off the per-request path (BRD §18) |
+| Shared-state (not a service-to-service call) | API Gateway | Redis-backed revocation list (`identity:revocation:*`) | **Shared infra**, not REST/event | Identity writes on logout, forced role-change, and admin-lock; Gateway reads on every request to catch a revoked-but-unexpired token (edge-cases.md, "Stale Revocation Under Stateless JWT Validation"; design-decisions.md, "Shared State-Store Technology"). See Distributed-Monolith Risk below — this is the one dependency nearly every authenticated request indirectly relies on. |
+| Outbound (published) | User, Notification, Analytics | `UserRegistered` | **Async** | 3x retry, `identity.dlq` (ADR-0007) |
+| Outbound (published) | Analytics | `SessionCreated` | **Async** | 2x retry, `identity.dlq` (ADR-0007) |
+| Outbound (published) | User | `UserAccountUpdated` (payload: `userId`, `email`, `displayName`, plus a proposed monotonic `updatedAt`/sequence field per edge-cases.md — not yet confirmed, Event Design Agent's job) | **Async** | 2x retry, `identity.dlq` (ADR-0006). Confirmed on `kart-user-service`'s own requirement-spec.md as a consumed event — no divergence between the two docs. |
+| Outbound (external, sync) | Enterprise IdP | SAML AuthnRequest / OIDC authorization request | **Sync**, per-IdP bulkhead | design-decisions.md, "Resilience Pattern for External IdP Calls" |
+| Outbound (external, sync) | Social IdP | OIDC authorization request | **Sync**, own bulkhead group | Same decision as above, isolated group |
+| Consumed | — none — | — | — | Confirmed empty by design (requirement-spec.md §5) — the admin-suspension trigger is a synchronous inbound API call, not an event Identity consumes. See "Flagged for Human Review" below for one open question this run surfaces about whether that should still hold. |
+
+No synchronous outbound dependency exists on any other **internal** Kart service — Identity's only synchronous outbound calls are to external IdPs, which it does not control and which are the explicit reason it holds "sole point of contact" status (BRD §24.2). Its only synchronous *inbound* internal-service dependency is Admin Service's lock/unlock call, and that call originates in Admin, not Identity.
+
+## Sync vs. Async Resolution — Federation Session Termination / SLO (resolves requirement-spec.md §6, item 1)
+
+Requirement-spec.md explicitly carried this item forward as "Architecture Agent-level integration design" rather than resolving it directly, since it depends on which specific enterprise IdP capabilities are available. Resolved here for v1:
+
+- **No inbound SLO webhook, SCIM push endpoint, or IdP-polling integration is added to Identity's boundary in this pass.** The BRD names Okta/Azure AD/Google Workspace only as illustrative examples of "an enterprise IdP," not a contracted integration with a named, capability-confirmed customer — building a speculative SCIM/SLO consumer now would add a real inbound dependency edge (and an operational surface: webhook auth, replay protection, retry/DLQ policy) against a capability set that isn't yet concrete.
+- **The already-decided 24-hour absolute federated-refresh-token cap (requirement-spec.md §4) remains the sole v1 mitigation** for the gap this leaves (an IdP-side deprovisioning event that Identity has no live signal for) — a bounded, known exposure window rather than an unbounded one, consistent with Domain Invariant #2.
+- **This is an explicit architecture-level scoping decision, not a silent gap.** When a specific enterprise customer's IdP capabilities (SCIM support, a SAML/OIDC SLO endpoint) are actually known, adding a real-time deprovisioning-propagation edge is new scope requiring its own ADR (it would add a new inbound dependency and a new consumed-event/webhook contract, changing the "no consumed events" invariant recorded above) — not a retroactive edit to this document.
+
+## Redundancy / Availability Architecture (resolves requirement-spec.md §3's deferred 99.99% design)
+
+Requirement-spec.md assigns Identity the platform's highest availability tier but explicitly leaves "the specific redundancy/failover architecture needed to hit 99.99% (multi-AZ, read replicas, etc.)" to this stage. Resolved:
+
+- **Stateless API tier:** Identity's `Api`/`Application` layers are horizontally scaled across multiple availability zones behind the Gateway/load balancer — ordinary active-active scaling, since no per-instance state is held outside the shared stores below.
+- **PostgreSQL (write model):** deployed multi-AZ with synchronous (or quorum) replication and automatic failover, **not** an asynchronous read-replica topology for security/consistency-critical reads (login, refresh, role-mapping resolution). This generalizes design-decisions.md's "Caching Strategy for Role/Group-Mapping Resolution (No Cache)" reasoning one layer down: an async replica reintroduces the exact staleness risk that decision rejected a cache for (a just-revoked mapping still granting a role, or a just-added mapping not yet visible) — replication lag and cache staleness are the same failure mode from this NFR's point of view. Non-critical, purely informational reads may still use a replica if one exists for other reasons, but nothing on the login/refresh/role-resolution path may.
+- **Redis (revocation list, MFA challenge state, SAML assertion-ID cache):** deployed as a highly-available cluster (Sentinel or equivalent multi-AZ topology), matching Identity's own 99.99% target rather than a lower one. This is a direct consequence of the Distributed-Monolith Risk finding below: Redis is no longer "only" Identity's dependency — the Gateway's per-request revocation check on every authenticated request platform-wide now depends on it too, so its availability posture must not be the weakest link undermining Identity's stated NFR.
+- **External IdP calls** are excluded from this service's own availability accounting — per-IdP circuit breakers (design-decisions.md) mean an enterprise customer's IdP outage degrades only federation for that IdP, not Identity's own uptime for native login or other customers' federation.
+
+## Distributed-Monolith Risk
+
+**Two distinct risk shapes, assessed separately — neither judged a boundary defect, both flagged as guard-rails to preserve, not problems to fix:**
+
+- **Identity looks maximally depended-upon platform-wide, but this is not a chatty runtime coupling.** Every service's authorization ultimately rests on a JWT Identity minted, and every other service is a pure claim *consumer* (BRD §24.1) — but this dependency is resolved **once, locally, at Gateway edge** via a cached RS256 public key (BRD §18), not via a live per-request call to Identity's API. The "single issuer" property is a design-time/mint-time coupling, not a request-time one. **Guard-rail to preserve:** if a future implementation changes the Gateway's revocation check (below) from direct shared-Redis access into a live synchronous introspection call against Identity's own API, that reintroduces full per-request coupling — explicitly rejected by edge-cases.md's "Stale Revocation Under Stateless JWT Validation" decision. This document reaffirms that constraint as an explicit boundary the Database/API Design stages must not cross.
+- **The Gateway's direct read/write access to Identity-owned Redis keys is a deliberate, narrow exception to "access another service's data only through its API/events," not a precedent to generalize.** It is a shared-infra dependency (both sides reading/writing the same TTL-bounded, non-relational key space), chosen explicitly over the two worse alternatives edge-cases.md considered (full per-request introspection, which defeats stateless edge validation; or no revocation check at all, which violates Domain Invariant #2). Because this makes Redis a hard dependency of nearly every authenticated request platform-wide (not just Identity's own traffic), its HA posture is addressed explicitly above rather than left implicit.
+
+No multi-hop synchronous chain exists anywhere in Identity's boundary (its only synchronous outbound calls are to external IdPs it doesn't control; its only synchronous inbound internal edge is Admin's single-hop lock/unlock call), so this is not the "chatty, should-be-async" pattern this stage exists to catch — it is a "foundational-but-decoupled-at-request-time" shape, which is the intended one for a single-issuer identity service.
+
+## Flagged for Human Review — Possible Gap in ADR-0016 (`UserDataErased` Consumption)
+
+ADR-0016 (`docs/adr/0016-user-gdpr-erasure-policy.md`) establishes `UserDataErased` and states "every downstream service holding userId-linked PII is expected to consume `UserDataErased` and redact/anonymize its own copy," naming Order, Notification, Analytics, Review, Recommendation, and Wishlist explicitly in its Consequences — **Identity Service is not named**, even though Identity itself stores login email, password hash/salt, and an encrypted TOTP secret (PII per requirement-spec.md's own Domain Invariant §4: "credentials and any stored personal identifiers must be encrypted at rest").
+
+This is not re-decided here: requirement-spec.md's Consumes list is stated as intentionally empty (§5), that spec is already `status: approved`, and adding a new consumed event to this architecture doc unilaterally would be inventing scope neither the requirement-spec, edge-cases.md, nor ADR-0016 itself actually assigns to Identity. Flagging explicitly instead, per this agent's own escalation rule (do not silently pick a side on a cross-document conflict): **a human should confirm whether Identity needs its own `UserDataErased` consumer/redaction handler for its login-credential-adjacent PII, or whether ADR-0016's omission of Identity from its enumerated list was deliberate** (e.g., because an account lock/unlock — already the mechanism for admin-triggered suspension — is judged sufficient, or because credential PII is considered out of ADR-0016's scope). If the answer is "yes, Identity needs this," that is new scope for a revised requirement-spec.md pass, not a retrofit of this document.
+
+## Sign-off
+
+- [ ] Reviewed by: _pending human review_
+- [ ] Approved to proceed to DDD Agent

@@ -1,0 +1,56 @@
+---
+doc_type: architecture
+service: kart-payment-service
+status: pending-approval
+generated_by: architecture-agent
+source: docs/services/kart-payment-service/requirement-spec.md
+---
+
+# Architecture: kart-payment-service
+
+## Boundary Rationale
+
+`kart-payment-service` is the bounded context that answers "did money actually move, and can we prove it" — it owns payment intents, idempotent charge execution against a payment gateway, refunds, and (per [ADR-0012](../../adr/0012-payment-chargeback-handling.md)) chargeback/dispute recording. Per BRD §5.3, its boundary exists specifically for **PCI-scope reduction**: it is the only service in the platform that touches gateway tokens, so a compromise's blast radius is contained to one service rather than spreading across the checkout path. This is a stronger and narrower boundary rationale than "Payment is a saga step" — Payment would still need to be its own bounded context even if it were never called from a saga at all, purely on tokenization/PCI-isolation grounds (BRD §24: "payment data never stored — tokenized by the gateway provider").
+
+Payment is one of the platform's three money-moving/write-heavy, correctness-over-speed services (BRD §6.1, alongside Order and Inventory) and the *only* service given the platform's highest event retry/paging tier (`payment.dlq`, 5x, paged on-call — BRD §10 footnote). Its own internal state machine (`payment_intents`) is deliberately never delegated to or duplicated inside the Order Saga's state machine (requirement-spec Domain Invariant #2) — Order treats Payment as an opaque, authoritative black box for "is this charge done," not a set of fields it can read/write directly.
+
+A refund is modeled as its own Saga instance, distinct from the Order Saga, because it "can be partial and asynchronous relative to the original order lifecycle" (BRD §12.2) — this is a second, narrower boundary decision inside the same service, not a separate bounded context.
+
+## Dependencies
+
+| Direction | Peer Service | Mechanism | Type | Notes |
+|---|---|---|---|---|
+| Inbound (consumed) | Order | `OrderCreated` event | **Async** | Triggers charge initiation (requirement-spec §2; BRD §5.1 Dependencies row states "Payment Service (async)" for Order's own dependency — see Sync/Async Resolution below for how this reconciles with §12.1's uniform-looking sequence-diagram arrows). Payload: `orderId, userId, items, total`. 3x retry / `order.dlq` on the publisher (Order) side. |
+| Inbound | Payment Gateway (external system) | Gateway API call (tokenized charge/refund) | **Sync**, external | Bounded retry (3x, exponential backoff, transient errors only) + circuit breaker (requirement-spec Open Question #9 resolution); a definitive decline is terminal immediately, never retried |
+| Inbound | Payment Gateway (external system) | `POST /payments/webhooks/{gateway}` (new, gateway-facing) | **Async**, external, inbound | Asynchronous charge/refund/chargeback confirmation; idempotent-by-gateway-event-ID with a monotonic state-ordering guard (requirement-spec Open Question #3 resolution) |
+| Inbound (client-facing) | API Gateway → client / Support Agent tooling | `POST /payments/charge`, `POST /payments/{id}/refund` | **Sync** (REST) | See Sync/Async Resolution below — `refund` is genuinely support-agent-driven per BRD §22 ("Support Agent can refund, but only up to $X," fine-grained-checked at Payment itself since the API Gateway cannot know the order total); `charge`'s primary trigger is the async `OrderCreated` consumer, not a direct synchronous caller, in the current saga design |
+| Outbound (published) | Order, Notification, Analytics | `PaymentCompleted` event | **Async** | Payload `orderId, txnId`; 5x retry, `payment.dlq`, paged on-call (BRD §10) |
+| Outbound (published) | Order, Notification, Analytics | `PaymentFailed` event | **Async** | Payload `orderId, reason`; 5x retry, `payment.dlq`, paged on-call (BRD §10); drives Order Saga compensation (BRD §12.2) |
+| Outbound (published) | Order, Notification, Analytics | `RefundIssued` event | **Async** | Payload `orderId, refundId, amount`; 5x retry, `payment.dlq`, paged on-call (BRD §10, gap closed by [ADR-0007](../../adr/0007-event-catalog-completeness.md)); one event per partial refund |
+| Outbound (published) | Order, Notification, Analytics | `ChargebackReceived` event (new) | **Async** | Payload `orderId, paymentIntentId, chargebackId, amount, reason`; 5x retry, `payment.dlq`, paged on-call; new per [ADR-0012](../../adr/0012-payment-chargeback-handling.md); routed under existing `payment.*` convention so it falls automatically under Notification's [ADR-0003](../../adr/0003-notification-consumed-event-scope.md) scope and Analytics' [ADR-0004](../../adr/0004-analytics-full-fanin-ingestion.md) full fan-in with no change needed to either ADR |
+
+No synchronous outbound call from Payment to any other Kart service. Payment's only synchronous outbound dependency is the external Payment Gateway.
+
+## Sync vs. Async Resolution (Order↔Payment "Charge" step)
+
+BRD §12.1/§12.2's saga sequence diagrams draw `Order->>Payment: Charge` / `Payment-->>Order: PaymentCompleted`/`PaymentFailed` with the same solid-arrow notation used for `Order->>Inventory: Reserve stock`. Taken literally this would suggest a synchronous REST call for every saga step, but the underlying dependency-type annotations are not uniform: BRD §5.1's own Dependencies row states "Inventory Service (**sync** reserve call + async confirm), Payment Service (**async**), Shipping Service (async)" — Inventory is explicitly the one saga dependency with a synchronous leg; Payment and Shipping are not. Payment's own boundary-rationale row (§5.3) confirms this from its own side: its only stated Consumes entry is `OrderCreated` (an event), not a synchronous inbound charge call from Order.
+
+**Resolution:** the Order Saga's "Charge" step is realized fully asynchronously — Order's `POST /orders` handler commits the order and an `OrderCreated` Outbox row in the same transaction (BRD §11 Outbox Pattern); Payment's `OrderCreated` consumer is what actually initiates the charge, and `PaymentCompleted`/`PaymentFailed` (not a synchronous HTTP response) is what carries the saga forward or back. This makes Payment a step Order can be temporarily unavailable-tolerant of without blocking order creation itself, at the cost of the saga only being able to move past "reserved" once the async round trip completes — an accepted latency/decoupling trade-off consistent with `PaymentCompleted`/`PaymentFailed` NFRs already being event-delivery-guaranteed (at-least-once, 5x retry) rather than request/response.
+
+`POST /payments/charge` remains part of Payment's API surface (BRD §5.3) but is not the saga's trigger path in this design — it is the synchronous entry point the `OrderCreated` consumer's handler internally calls (same idempotent charge-command code path, one HTTP-inbound, one message-consumer-inbound), and is the endpoint any future direct/synchronous integration (e.g., a support-tooling manual retry) would use. Because the event-driven path has no inbound `Idempotency-Key` header to read, Payment derives that key deterministically from `orderId` (plus a fixed `charge` discriminator) when the charge is initiated by the `OrderCreated` consumer, so the same `(idempotency_key, endpoint)`-scoped unique-constraint mechanism (requirement-spec Open Question #1) applies uniformly regardless of which entry point initiated the charge. `POST /payments/{id}/refund` has no such ambiguity — BRD §22 names Support Agent as a genuine synchronous, human-driven caller of it (fine-grained per-refund-amount check enforced at Payment itself, since the API Gateway's coarse RBAC check can't know the order total).
+
+## Distributed-Monolith Risk
+
+**Low, by design, at the Kart-internal boundary.** Payment has zero synchronous outbound dependency on any other Kart service — its only synchronous outbound call is to the external Payment Gateway, and that call already has a circuit breaker plus bounded transient-only retry (requirement-spec Open Question #9 resolution) specifically so a degraded gateway does not cascade into Payment itself being perceived as down. Order's dependency on Payment is fully async in both directions, so Payment being briefly slow or unavailable delays saga progression rather than blocking the synchronous `POST /orders` call itself.
+
+Two risks worth naming explicitly, not because either is a synchronous-call antipattern but because they are still real coupling:
+
+1. **Saga-availability coupling, not call-chattiness.** An order cannot reach `Confirmed` without a completed charge (requirement-spec NFR table), so Payment's 99.99% availability target (confirmed here, resolving requirement-spec's non-blocking Open Question #8 — Payment is named in both saga diagrams and in Order's own Dependencies row, which is enough to place it in the order-path tier rather than the generic "secondary" 99.9% tier) is load-bearing for the whole Order Saga's throughput, even though the coupling is async. A prolonged Payment outage doesn't return errors to `POST /orders`, but it does stall every order in the `reserved`-pending-charge state platform-wide — an availability risk that looks different from, but is not less serious than, a synchronous chain.
+2. **Compensation-gating dependency on the external gateway, not on another Kart service.** The "Saga Compensation Against a Pending/Unknown Gateway State" edge case (edge-cases.md) means Order's compensation path can itself stall waiting on Payment's own gateway-reconciliation step. This is a dependency on an *external* system (the gateway), routed through Payment, rather than a Kart-internal distributed-monolith pattern — flagged here because it's the one place where an external system's slowness can back-pressure the Order Saga's compensation flow, not because Payment calls another Kart service synchronously.
+
+No chatty synchronous fan-out exists at Payment's boundary that should be converted to async, and no existing async edge here should instead be synchronous — `ChargebackReceived` in particular is correctly async: Order reacts to it via its own existing reverse-order compensation logic (release Inventory, no second Payment-initiated refund, per ADR-0012 and `kart-order-service`'s own "Payment-Success / Shipping-Failure Compensation Ordering" edge case) on its own schedule, not synchronously blocking Payment's chargeback ingestion.
+
+## Sign-off
+
+- [ ] Reviewed by: _pending human reviewer_
+- [ ] Approved to proceed to DDD Agent

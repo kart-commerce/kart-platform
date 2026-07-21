@@ -14,9 +14,9 @@ source: docs/services/kart-cart-service/requirement-spec.md
 - **Why it happens:** two independently-built carts are reconciled into one, and requirement-spec FR §2 states merge as a responsibility without a conflict-resolution rule (Open Question 2).
 - **Solutions available (3):** sum quantities across both carts · take the max of the two quantities · logged-in cart wins on conflict, guest line item discarded.
 - **Decision (3-5 bullets max):**
-  - Chosen: unresolved — escalated, not decided here.
-  - Why: each option has a different silent user-facing consequence (inflating a quantity the user didn't ask for vs. dropping a guest selection entirely), and the BRD gives no signal on which is acceptable — this is a business call, not an engineering default.
-  - Trade-off accepted: none — carried to requirement-spec Open Question 2 for human resolution before the Architecture Agent designs the merge operation.
+  - Chosen: sum quantities on overlapping SKUs; union (keep both) on non-overlapping SKUs; cap the merged cart at 100 distinct line items (dropping lowest-value overflow if the cap is exceeded).
+  - Why: sum-on-overlap is the only option that treats both sessions' additions as real user intent rather than silently discarding one of them — a guest who added a SKU and later, now logged in, adds more of the same SKU (e.g. from a second device) most plausibly meant both to count. Union-on-distinct-SKUs is the only non-lossy choice when the carts don't overlap at all. This resolves requirement-spec Decision D2 (see `requirement-spec.md` §6) as a single-service engineering default — no ADR needed, since the rule is entirely internal to Cart's own merge logic and not visible to any other service's contract.
+  - Trade-off accepted: a user may see a summed quantity larger than they explicitly intended in either individual session (e.g. they meant to replace, not add to, a guest-cart quantity) — judged acceptable and correctable at checkout, versus the alternative of silently dropping a guest-cart line item the user never explicitly abandoned.
 
 ## Edge Case: Cart lost on Redis eviction or restart
 
@@ -54,6 +54,6 @@ source: docs/services/kart-cart-service/requirement-spec.md
 - **Why it happens:** requirement-spec FR §2 and domain invariant §4 name expiry as a responsibility, but the actual TTL value and whether it resets on activity (sliding) or not (absolute) are unstated (Open Question 1) — a fixed TTL with no touch-to-extend behavior will race a returning user against silent eviction.
 - **Solutions available (3):** sliding TTL — reset expiry on every cart read/write · fixed absolute TTL from cart creation regardless of activity · fixed TTL plus a soft-expiry grace window, recoverable from the PostgreSQL snapshot for N days after Redis eviction.
 - **Decision (3-5 bullets max):**
-  - Chosen: unresolved — escalated, not decided here.
-  - Why: the actual TTL duration is a product decision (how long counts as "abandoned") that the BRD gives no number for; picking one here would be inventing a requirement, not extracting one.
-  - Trade-off accepted: none — carried to requirement-spec Open Question 1 for human resolution before the Architecture Agent sizes Redis TTL/eviction policy.
+  - Chosen: sliding TTL (resets on every read/write) — 30 days idle for a logged-in user's cart, 7 days idle for a guest cart — plus a 30-day PostgreSQL soft-expiry recovery window past Redis eviction before the row is purged outright.
+  - Why: sliding, not absolute, matches the intuitive meaning of "abandoned" — an actively-touched cart should never expire mid-use, which directly closes this edge case's race. The 30/7-day asymmetry mirrors the platform's general pattern of trusting authenticated identity more than an anonymous session. This resolves requirement-spec Decision D1 (see `requirement-spec.md` §6) as a single-service engineering default, grounded in the BRD's own average-cart-size signal (§4.1) and general e-commerce practice — no ADR needed, since Redis TTL sizing is entirely internal to Cart.
+  - Trade-off accepted: a guest who returns after more than 7 days loses their cart outright with no recovery path (no durable identity exists to reattach a snapshot to); a returning user within the sliding window never experiences the race this edge case describes, since the touch that triggers the race also resets the TTL.
