@@ -63,3 +63,28 @@ Reviewed against a bar of: functional coverage matches the BRD's actual scope fo
 | `kart-delivery-tracking-service` | Missing edge cases: duplicate (not just out-of-order) carrier webhook delivery; unmapped carrier status as its own case; tracking query before the first status event has arrived |
 | `kart-admin-service` | RBAC edge cases describe Admin maintaining its own authorization/permission state, conflicting with §24.1's fixed single-issuer (Identity) model |
 | `kart-offer-service` (`edge-cases.md` only) | Chosen cache-invalidation strategy contradicts BRD §16's explicit write-through mandate for promotion/pricing flags; missing edge cases for coupon-expiry-racing-checkout and expired-`PricingQuote`-reuse (both already named as hard invariants in this service's own approved `ddd-model.md`) |
+
+## Recommended Build Order
+
+Derived from the actual event/API dependency graph (who consumes whose contract), business criticality (money-moving critical path), and the review-pass status above. Prerequisite for all of these: `kart-shared`, `kart-infra`, and `kart-devops` must exist first — every service's Dockerfile/CI calls `kart-devops`'s reusable workflow, and every contract is a versioned `kart-shared` package.
+
+| # | Service | Why |
+|---|---|---|
+| 1 | `kart-identity-service` | Auth/RBAC/SSO foundation every service's gateway integration and Admin depend on. Build first despite NEEDS-WORK — fix §24.1/§24.2 gaps before scaffolding. |
+| 2 | `kart-category-service` | Zero dependencies on any other service; feeds Product's denormalized category name. Approved — safe to start immediately. |
+| 3 | `kart-inventory-service` | Stock truth both Cart and Order need (Order's reserve call is synchronous). Highest-contention code in the platform — wants the longest hardening runway. NEEDS-WORK — fix before scaffolding. |
+| 4 | `kart-delivery-tracking-service` | Zero Kart-service dependencies (external carrier webhooks only) — but Order needs it later for `OrderDelivered` (ADR-0005), so start early. NEEDS-WORK. |
+| 5 | `kart-product-service` | Catalog foundation for Search/Offer/Wishlist; depends on Category. NEEDS-WORK — fix before scaffolding. |
+| 6 | `kart-user-service` | Consumes Identity's `UserRegistered`/`UserAccountUpdated` (ADR-0006). Approved — ready once Identity's contract is stable. |
+| 7 | `kart-search-service` | Consumes Product's `ProductCreated`/`ProductPriceChanged`. Approved — ready once Product's contract is stable. |
+| 8 | `kart-offer-service` | Consumes Product's `ProductPriceChanged`. Architecture/DDD/contracts already approved; only `edge-cases.md` NEEDS-WORK. |
+| 9 | `kart-wishlist-service` | Consumes Product's `ProductPriceChanged`. NEEDS-WORK. |
+| 10 | `kart-cart-service` | Consumes Inventory's `InventoryReservationFailed`. Approved — ready once Inventory's contract is stable. |
+| 11 | `kart-payment-service` | Mutual contract dependency with Order (resolved via `kart-shared` schema-first, not a runtime blocker) — PCI-isolated and self-contained, pin its contract just ahead of Order. Approved. |
+| 12 | `kart-order-service` | The Saga orchestrator — needs Inventory (sync), Payment (contract), Cart (checkout handoff) all stable. NEEDS-WORK — highest-scrutiny fix needed; this is the revenue-critical path. |
+| 13 | `kart-shipping-service` | Consumes Order's `OrderConfirmed`. Approved — ready once Order exists. |
+| 14 | `kart-notification-service` | Broadest consumer so far — `order.*`/`payment.*`, plus Wishlist and Identity events (ADR-0003). Approved — build once those producers are stable. |
+| 15 | `kart-review-service` | Consumes Order's `OrderDelivered` — needs Order *and* Delivery Tracking wired together. NEEDS-WORK. |
+| 16 | `kart-recommendation-service` | Consumes Order's `OrderDelivered` + clickstream. Approved — ready alongside Review. |
+| 17 | `kart-admin-service` | Back-office spanning Identity/User/Product/Offer. NEEDS-WORK — RBAC edge cases still describe owning its own auth state, conflicting with §24.1 — fix before scaffolding. |
+| 18 | `kart-analytics-service` | Full fan-in (ADR-0004) over every event above — naturally last for complete value. Approved; its bare ingestion consumer is simple enough to stand up early in parallel if historical event data matters. |
