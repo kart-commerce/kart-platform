@@ -1,0 +1,438 @@
+# doc_type: api-contract
+# service: kart-analytics-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-analytics-service/requirement-spec.md (approved; §6 D4a dashboards/funnels enumeration, D4b query-surface decision)
+#   - docs/services/kart-analytics-service/edge-cases.md (approved; Schema Evolution, Replay Correctness, Out-of-Order Arrival)
+#   - docs/services/kart-analytics-service/design-decisions.md (pending human sign-off — see note below)
+#   - docs/services/kart-analytics-service/architecture.md (pending human sign-off — see note below; §"Resolved: Dashboards/Funnels Query Surface" (D4b) and "Non-Functional Targets Proposed by This Stage")
+#   - docs/adr/0004-analytics-full-fanin-ingestion.md (full event fan-in — no publish-side contract; this service has no write API)
+#
+# Flag (per api-design-agent.md Failure Conditions — not a breaking-change case, but noted since
+# this stage normally requires an *approved* upstream doc): architecture.md and design-decisions.md
+# for this service still carry an unchecked sign-off checkbox (frontmatter status: pending-approval)
+# even though their content contains no open questions and is internally consistent with the now-
+# fully-closed requirement-spec.md/edge-cases.md. This contract is derived directly from their
+# already-decided content (D4a's enumerated dashboard/funnel set, D4b's internal-REST decision,
+# the proposed latency SLAs) rather than re-deciding anything. Re-confirm against those two docs
+# once a human checks their sign-off boxes; no substantive rework is expected.
+#
+# This service has NO public-facing API and is not routed through the public API Gateway
+# (BRD §5.4: "ingestion only"; architecture.md Boundary Rationale: "zero synchronous coupling
+# in either direction"). The only synchronous surface is this internal-only read/query layer
+# over pre-aggregated dashboard/funnel tables, reachable from the internal network segment
+# (admin console, internal service-to-service calls, BI-tool data-source connector) per
+# architecture.md's "Resolved: Dashboards/Funnels Query Surface" (D4b). Analytics' actual
+# ingestion path (Kafka, full fan-in per ADR-0004, schema-registry-gated per requirement-spec
+# §6 D2) is consumer-only and has no synchronous request/response shape — it is not modeled
+# here; it belongs in this service's future event-contract.md, not this OpenAPI document.
+#
+# No endpoint here mutates state or money-adjacent state (GET-only, read models rebuilt from
+# the raw event log per ddd-cqrs-standards.md): the `Idempotency-Key` header required by
+# api-standards.md for money-moving POSTs does not apply to any route in this contract.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this
+# pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-analytics-service Internal Query API
+  version: 1.0.0
+  description: >
+    Internal-only, read-only dashboards/funnels query surface over Analytics' warehouse
+    read models. Not reachable through the public API Gateway. Analytics ingests the full
+    platform event fan-in (ADR-0004) and publishes nothing back to the bus; this API is the
+    service's only synchronous surface, serving the initial dashboard/funnel set enumerated
+    in requirement-spec.md §6 (D4a).
+
+servers:
+  - url: https://internal.kart.local/analytics
+    description: >
+      Internal network segment only (admin console, internal service-to-service callers,
+      BI-tool connector). Never routed through the public API Gateway (BRD §5.4; architecture.md).
+
+security:
+  - internalClientCredentials: [analytics.dashboards.read]
+
+paths:
+  /internal/v1/funnels/order-conversion:
+    get:
+      operationId: getOrderConversionFunnel
+      summary: Order conversion funnel — CartCheckedOut → OrderCreated → OrderConfirmed → PaymentCompleted → OrderDelivered.
+      description: >
+        Per-stage counts and drop-off rate. Grounded in BRD §10's annotation of `CartCheckedOut`
+        as "(funnel/conversion tracking)" — requirement-spec.md §6 D4a.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Funnel stage counts and drop-off rates for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      stages:
+                        type: array
+                        items:
+                          type: object
+                          required: [stage, count]
+                          properties:
+                            stage:
+                              type: string
+                              enum: [CartCheckedOut, OrderCreated, OrderConfirmed, PaymentCompleted, OrderDelivered]
+                            count: { type: integer, format: int64 }
+                            dropOffRate:
+                              type: number
+                              nullable: true
+                              description: Fraction lost vs. the previous stage; null for the first stage.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/revenue:
+    get:
+      operationId: getRevenueDashboard
+      summary: Revenue aggregated from OrderCreated/PaymentCompleted payload totals, by SKU/category.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+        - name: sku
+          in: query
+          required: false
+          schema: { type: string }
+        - name: category
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Revenue time series for the requested window/breakdown.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      series:
+                        type: array
+                        items:
+                          type: object
+                          required: [bucketStart, revenue]
+                          properties:
+                            bucketStart: { type: string, format: date-time }
+                            revenue: { $ref: '#/components/schemas/Money' }
+                            orderCount: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/fulfillment-performance:
+    get:
+      operationId: getFulfillmentPerformanceDashboard
+      summary: Time-to-ship/time-to-deliver, from ShipmentDispatched → DeliveryStatusUpdated → OrderDelivered.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Fulfillment latency percentiles for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      timeToShip: { $ref: '#/components/schemas/DurationPercentiles' }
+                      timeToDeliver: { $ref: '#/components/schemas/DurationPercentiles' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/inventory-movement:
+    get:
+      operationId: getInventoryMovementDashboard
+      summary: Stock reservation/release/replenishment trends.
+      description: >
+        From `InventoryReserved`, `InventoryReservationFailed`, `InventoryReleased`,
+        `InventoryReplenished` (ADR-0007 added the latter two to the catalog).
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+        - name: sku
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reservation/release/replenishment/failure counts for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      reserved: { type: integer, format: int64 }
+                      reservationFailed: { type: integer, format: int64 }
+                      released: { type: integer, format: int64 }
+                      replenished: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/catalog-pricing:
+    get:
+      operationId: getCatalogPricingDashboard
+      summary: ProductCreated/ProductPriceChanged/CategoryUpdated volume and change frequency.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Catalog/pricing change-event volume for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      productsCreated: { type: integer, format: int64 }
+                      priceChanges: { type: integer, format: int64 }
+                      categoryUpdates: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/promotions-effectiveness:
+    get:
+      operationId: getPromotionsEffectivenessDashboard
+      summary: Coupon/promotion redemption rate and attributable order volume.
+      description: From `CouponRedeemed`, `PriceQuoteIssued`, `PromotionActivated` (BRD §10).
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Redemption rate and attributable order volume for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      couponsRedeemed: { type: integer, format: int64 }
+                      quotesIssued: { type: integer, format: int64 }
+                      attributableOrderVolume: { $ref: '#/components/schemas/Money' }
+                      redemptionRate: { type: number, description: "couponsRedeemed / quotesIssued for the window" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/user-growth:
+    get:
+      operationId: getUserGrowthDashboard
+      summary: Signups, logins, profile-change volume over time.
+      description: From `UserRegistered`, `SessionCreated`, `UserAccountUpdated`/`UserProfileUpdated` (BRD §10).
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Signup/login/profile-change counts for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      signups: { type: integer, format: int64 }
+                      sessionsCreated: { type: integer, format: int64 }
+                      profileChanges: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/reviews-ratings:
+    get:
+      operationId: getReviewsRatingsDashboard
+      summary: ReviewSubmitted volume and rating distribution.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+      responses:
+        '200':
+          description: Review volume and rating distribution for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      reviewCount: { type: integer, format: int64 }
+                      ratingDistribution:
+                        type: object
+                        description: Count of reviews per star rating (keys "1".."5").
+                        additionalProperties: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/admin-audit:
+    get:
+      operationId: getAdminAuditDashboard
+      summary: AdminActionPerformed trail, for back-office accountability.
+      description: Added to the Event Catalog by ADR-0007; audit trail only, no PII beyond what AdminActionPerformed itself carries.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: actionType
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Admin action trail for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      actions:
+                        type: array
+                        items:
+                          type: object
+                          required: [occurredAt, actionType, adminId]
+                          properties:
+                            occurredAt: { type: string, format: date-time }
+                            actionType: { type: string }
+                            adminId: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /internal/v1/dashboards/notification-delivery:
+    get:
+      operationId: getNotificationDeliveryDashboard
+      summary: NotificationSent / WishlistPriceAlertTriggered delivery-status volume by channel.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Granularity'
+        - name: channel
+          in: query
+          required: false
+          schema: { type: string, example: email }
+      responses:
+        '200':
+          description: Delivery-status volume by channel for the requested window.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DashboardEnvelope'
+                  - type: object
+                    properties:
+                      byChannel:
+                        type: array
+                        items:
+                          type: object
+                          required: [channel, sent]
+                          properties:
+                            channel: { type: string }
+                            sent: { type: integer, format: int64 }
+                            priceAlertsTriggered: { type: integer, format: int64 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    internalClientCredentials:
+      type: oauth2
+      description: >
+        Identity-issued OAuth2 Client Credentials token (BRD §24.1), scoped for internal
+        callers only (admin console, internal service-to-service, BI-tool connector) — same
+        pattern as this platform's other internal-only endpoints (e.g.
+        kart-identity-service's `/internal/users/{userId}/lock`, per ADR-0010).
+      flows:
+        clientCredentials:
+          tokenUrl: https://internal.kart.local/identity/oauth2/token
+          scopes:
+            analytics.dashboards.read: Read access to Analytics' internal dashboards/funnels query surface.
+
+  parameters:
+    From:
+      name: from
+      in: query
+      required: true
+      schema: { type: string, format: date-time }
+      description: Inclusive window start (event time).
+    To:
+      name: to
+      in: query
+      required: true
+      schema: { type: string, format: date-time }
+      description: Exclusive window end (event time).
+    Granularity:
+      name: granularity
+      in: query
+      required: false
+      schema: { type: string, enum: [hour, day, week, month], default: day }
+      description: Time-series bucket size.
+
+  responses:
+    Unauthorized:
+      description: Missing/invalid internal client-credentials token.
+    Forbidden:
+      description: Token valid but missing the `analytics.dashboards.read` scope.
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
+
+    DurationPercentiles:
+      type: object
+      properties:
+        p50Hours: { type: number }
+        p95Hours: { type: number }
+        p99Hours: { type: number }
+
+    DashboardEnvelope:
+      type: object
+      description: >
+        Common metadata every dashboard/funnel response carries, surfacing the eventual-
+        consistency window rather than hiding it (ddd-cqrs-standards.md "surface, don't
+        hide"; architecture.md "Non-Functional Targets Proposed by This Stage").
+      required: [generatedAt, isProvisional]
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+          description: When this response was computed.
+        isProvisional:
+          type: boolean
+          description: >
+            True until the nightly batch reconciliation (edge-cases.md "Out-of-Order Event
+            Arrival" decision) finalizes the day's figures — proposed to complete by 06:00 UTC
+            (architecture.md). Reflects late/out-of-order event arrival across the full
+            fan-in (ADR-0004) plus the RabbitMQ→Kafka dual-publish migration window (BRD §15).
+        reconciledThrough:
+          type: string
+          format: date
+          nullable: true
+          description: Last date fully reconciled by the nightly batch; null if none yet for this window.

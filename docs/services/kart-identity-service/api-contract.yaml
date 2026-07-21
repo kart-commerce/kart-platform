@@ -1,0 +1,768 @@
+# doc_type: api-contract
+# service: kart-identity-service
+# status: pending-approval
+# generated_by: api-design-agent
+# source: docs/services/kart-identity-service/requirement-spec.md,
+#         docs/services/kart-identity-service/edge-cases.md,
+#         docs/services/kart-identity-service/design-decisions.md (proposed),
+#         docs/services/kart-identity-service/architecture.md (pending-approval)
+#
+# Process note (per this agent's own input contract): the normal input to
+# this stage is an *approved* ddd-model.md. That file does not exist yet for
+# kart-identity-service (docs/services/README.md's pipeline table still shows
+# "-" for Architecture/DDD Model/API-DB-Event Contracts for this service),
+# and design-decisions.md/architecture.md are themselves still
+# proposed/pending-approval, not approved. This draft was produced anyway,
+# at the orchestrating pipeline's explicit direction, from the two docs that
+# *are* approved (requirement-spec.md, edge-cases.md) plus the not-yet-approved
+# design-decisions.md/architecture.md as the best available grounding for
+# technology/boundary choices (RS256 signing, Redis-backed revocation list,
+# per-IdP resilience bulkheads, JIT provisioning, fail-closed role mapping).
+# Flagged explicitly rather than silently treated as equivalent to a real
+# ddd-model.md: a human must confirm this contract stays consistent once
+# ddd-model.md itself is produced and approved, and status here cannot move
+# past pending-approval until architecture.md/design-decisions.md are
+# themselves approved.
+#
+# No breaking-change risk: first issue of this contract, nothing published
+# to a shared-contracts repo yet. Publishing a stable copy to kart-shared is
+# deferred until that repo exists in this pipeline's scope (per this agent's
+# standard output note).
+#
+# Money-adjacent Idempotency-Key rule (api-standards.md): not applicable —
+# no endpoint in this contract mutates money-adjacent state.
+#
+# Two endpoints below are additions beyond requirement-spec.md §5's starting
+# API Surface table, added because a stated FR is otherwise unusable without
+# them (the same reasoning the requirement-spec itself used to add
+# /auth/logout, /auth/mfa/verify, and the password-reset pair):
+#   - POST /v1/auth/register: requirement-spec.md §2 states "Register a new
+#     user identity, publishing UserRegistered on success" as a Cross-service
+#     event-publishing FR, and BRD §24.2 states a native email/password
+#     account model exists alongside federation — but no row in the API
+#     Surface table (§5) actually triggers this. Added here.
+#   - POST /v1/auth/mfa/enroll and POST /v1/auth/mfa/enroll/confirm:
+#     requirement-spec.md §2 states MFA is "optional, customer-elected, off
+#     by default for the Customer role" and "required at every login" for
+#     Admin/Support Agent — electing in or being required to set up TOTP
+#     needs a provisioning step (secret/QR issuance + first-code
+#     confirmation) distinct from /auth/mfa/verify (which only completes an
+#     already-configured challenge at login time). Added here.
+
+openapi: 3.0.3
+info:
+  title: kart-identity-service API
+  version: 1.0.0
+  description: >
+    Platform AuthN, token issuance (JWT, RS256), session/refresh-token
+    lifecycle, TOTP-based MFA, RBAC role/claim issuance, and SSO/identity
+    federation (enterprise SAML/OIDC + customer social OIDC login).
+    Single issuer of platform role claims and sole point of contact with
+    any external IdP (BRD §24.1/§24.2; requirement-spec.md §4).
+
+servers:
+  - url: /v1
+
+paths:
+  # ---------------------------------------------------------------------
+  # Native AuthN / registration
+  # ---------------------------------------------------------------------
+  /auth/register:
+    post:
+      operationId: registerUser
+      summary: Create a native (email/password) Kart account.
+      description: >
+        Publishes UserRegistered (consumed by User, Notification, Analytics
+        per ADR-0007) and SessionCreated on success. MFA is off by default
+        for the Customer role (requirement-spec.md §2), so a successful
+        registration mints tokens immediately rather than requiring a
+        separate MFA step.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+                displayName: { type: string }
+      responses:
+        '201':
+          description: Account created and session established.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '409':
+          description: Email already registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '400':
+          description: Validation error (weak password, malformed email).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/login:
+    post:
+      operationId: login
+      summary: Authenticate with native email/password credentials.
+      description: >
+        Per-account and per-IP progressive throttling applies
+        (edge-cases.md, "Credential Stuffing / Brute-Force on /auth/login").
+        If the resolved role requires MFA (Admin, Support Agent — mandatory;
+        Customer — only if self-elected), no token is issued on password
+        success alone: a server-side MFA challenge is created instead
+        (edge-cases.md, "Partial-Auth Window During MFA" — chosen precisely
+        to avoid ever minting a pending-auth token that some endpoint could
+        fail to reject). Session identifier is always regenerated on
+        successful authentication (edge-cases.md, "Session Fixation via
+        Pre-Auth Session Reuse").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Fully authenticated (MFA not required for this login).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '202':
+          description: >
+            Password check passed; MFA required to complete authentication.
+            No token issued (edge-cases.md decision). Client must call
+            POST /auth/mfa/verify with the returned challengeId.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaChallenge' }
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '423':
+          description: >
+            Account locked — either admin-triggered (see
+            /internal/users/{userId}/lock) or progressive-throttle lockout
+            from repeated failed attempts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: >
+            Per-account or per-IP login attempt rate exceeded
+            (edge-cases.md, "Credential Stuffing / Brute-Force").
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/mfa/enroll:
+    post:
+      operationId: enrollMfa
+      summary: Begin TOTP (RFC 6238) enrollment for the authenticated user.
+      description: >
+        Issues a new TOTP secret and provisioning URI (for an authenticator
+        app / QR code). The secret is stored encrypted at rest (AES-256,
+        requirement-spec.md §4's PII invariant) but is not yet active until
+        confirmed via POST /auth/mfa/enroll/confirm with a first valid code.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: TOTP secret + provisioning URI issued, pending confirmation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provisioningUri: { type: string, description: "otpauth:// URI for QR-code enrollment" }
+                  secretExpiresAt: { type: string, format: date-time, description: "Unconfirmed enrollment attempt expires and must be restarted" }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/mfa/enroll/confirm:
+    post:
+      operationId: confirmMfaEnrollment
+      summary: Confirm TOTP enrollment with a first valid code, activating MFA.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [totpCode]
+              properties:
+                totpCode: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: MFA activated for this user.
+        '400':
+          description: Invalid or expired code.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/mfa/verify:
+    post:
+      operationId: verifyMfa
+      summary: Complete a pending MFA challenge from /auth/login and mint tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeId, totpCode]
+              properties:
+                challengeId: { type: string }
+                totpCode: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        '200':
+          description: MFA verified — session fully authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: Incorrect code, or challengeId unknown/expired.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/token:
+    post:
+      operationId: issueServicePrincipalToken
+      summary: OAuth2 Client Credentials grant — service-to-service token issuance.
+      description: >
+        Terminates the Client Credentials flow named alongside Authorization
+        Code in requirement-spec.md §2 ("Terminate both OAuth2 flows... at
+        Identity Service") — the flow a service principal (e.g., Admin
+        Service calling /internal/users/{userId}/lock, or a Partner API
+        client) uses to obtain a scoped token. Not applicable to MFA
+        (requirement-spec.md §2: "not applicable to Partner API — the
+        client-credentials flow is non-interactive"). No refresh token is
+        issued for this grant — callers request a new token per the
+        standard OAuth2 client-credentials pattern (no user session to
+        rotate against).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id, client_secret]
+              properties:
+                grant_type: { type: string, enum: [client_credentials] }
+                client_id: { type: string }
+                client_secret: { type: string }
+                scope: { type: string, description: "Requested scope(s), narrowed to what the client_id is pre-provisioned for" }
+      responses:
+        '200':
+          description: Service-principal token issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServicePrincipalToken' }
+        '401':
+          description: Invalid client_id/client_secret.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      summary: Rotate a refresh token for a new access/refresh pair.
+      description: >
+        Refresh tokens are single-use and rotated on every call (Domain
+        Invariant, requirement-spec.md §4). Native refresh tokens use a
+        30-day sliding window bounded by a 90-day absolute cap; federated
+        (SSO) refresh tokens use a 24-hour absolute cap with no sliding
+        extension (requirement-spec.md §4). Concurrent replay of the same
+        still-valid token is resolved by a DB-level conditional update
+        (design-decisions.md, "Concurrency Control for Refresh-Token
+        Rotation") — the losing request gets 409, not an error.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Rotated access/refresh pair issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: >
+            Refresh token reuse detected (replay of an already-rotated-out
+            token) — the entire token family (every session descended from
+            it) has been revoked (edge-cases.md, "Refresh Token Replay After
+            Rotation"; requirement-spec.md §4). Client must re-authenticate
+            from /auth/login.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: >
+            Lost the concurrent-refresh race on this token (edge-cases.md,
+            "Concurrent Refresh Race") — this is an expected outcome, not an
+            infrastructure error. Client should retry with the refresh
+            token returned by whichever concurrent request won, or treat as
+            a transient failure and retry the original request once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current session's tokens.
+      description: >
+        Adds the presented access token (and, if provided, its refresh
+        token) to the Redis-backed revocation list the Gateway consults on
+        every request (Domain Invariant, requirement-spec.md §4;
+        edge-cases.md, "Stale Revocation Under Stateless JWT Validation").
+        A revoked access token can still be honored for up to its remaining
+        TTL if the revocation-list check is skipped or lagging — an
+        accepted, bounded window, not full immediate revocation.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string, description: "Optional — also revoke this session's refresh token family." }
+      responses:
+        '204':
+          description: Logged out. Tokens added to the revocation list.
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/password/reset-initiate:
+    post:
+      operationId: initiatePasswordReset
+      summary: Start a native-account password reset.
+      description: >
+        Always returns 202 regardless of whether the email matches an
+        account, to avoid account-enumeration via response-shape
+        difference.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '202':
+          description: If the account exists, a reset token has been issued out-of-band.
+
+  /auth/password/reset-confirm:
+    post:
+      operationId: confirmPasswordReset
+      summary: Complete a password reset with the issued reset token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resetToken, newPassword]
+              properties:
+                resetToken: { type: string }
+                newPassword: { type: string, format: password, minLength: 8 }
+      responses:
+        '200':
+          description: >
+            Password changed. All outstanding sessions/refresh-token
+            families for this user are revoked via the same revocation-list
+            mechanism used for logout/role-change (requirement-spec.md §4)
+            — a password reset must not leave pre-reset sessions valid.
+        '400':
+          description: Reset token invalid, expired, or already used.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # SSO / Identity Federation (BRD §24.2) — route naming is this agent's
+  # own job per requirement-spec.md §5 ("names no specific path, verb, or
+  # per-IdP routing scheme... not invented here").
+  # ---------------------------------------------------------------------
+  /auth/sso/enterprise/{idpAlias}/login:
+    get:
+      operationId: startEnterpriseFederation
+      summary: SP-initiated redirect to a configured enterprise IdP (SAML or OIDC).
+      description: >
+        idpAlias identifies one configured enterprise IdP (Okta/Azure
+        AD/Google Workspace are the BRD's named examples, not an exhaustive
+        list) and is also the bulkhead/circuit-breaker key
+        (design-decisions.md, "Resilience Pattern for External IdP Calls").
+      parameters:
+        - name: idpAlias
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to the enterprise IdP's SAML AuthnRequest or OIDC authorization endpoint.
+        '404':
+          description: idpAlias not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sso/enterprise/{idpAlias}/saml/acs:
+    post:
+      operationId: enterpriseSamlAssertionConsumer
+      summary: SAML 2.0 Assertion Consumer Service endpoint.
+      description: >
+        Exchanges a signed SAML Response for a Kart JWT carrying Kart-native
+        role claims (BRD §24.2). Replay of the same assertion ID within its
+        validity window is rejected via a consumed-assertion-ID cache
+        (edge-cases.md, "SAML Assertion Replay at the ACS Endpoint"). Role
+        is resolved via Identity's config-driven IdP-group-to-Kart-role
+        mapping table, fail-closed (zero roles) if the asserted group has no
+        mapping entry — Admin is never auto-granted by a successful
+        assertion alone (requirement-spec.md §2/§4, resolved Open Question
+        #7). If no Kart account exists yet for this external identity, one
+        is JIT-provisioned (requirement-spec.md §2, resolved "Federated
+        Login With No Matching Kart Account" edge case) — the account can
+        exist with zero granted roles.
+      parameters:
+        - name: idpAlias
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [SAMLResponse]
+              properties:
+                SAMLResponse: { type: string, description: "Base64-encoded SAML Response, per the SAML 2.0 HTTP-POST binding" }
+                RelayState: { type: string }
+      responses:
+        '200':
+          description: Federation succeeded — Kart JWT issued (account JIT-provisioned if new).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: Assertion invalid, expired, or signature verification failed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Assertion ID already consumed (replay).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sso/enterprise/{idpAlias}/oidc/callback:
+    get:
+      operationId: enterpriseOidcCallback
+      summary: OIDC authorization-code callback for an enterprise IdP.
+      description: >
+        Same role-resolution, fail-closed-mapping, and JIT-provisioning
+        rules as the SAML ACS endpoint above — this is the OIDC-flavored
+        equivalent for enterprise IdPs that federate via OIDC rather than
+        SAML.
+      parameters:
+        - name: idpAlias
+          in: path
+          required: true
+          schema: { type: string }
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Federation succeeded — Kart JWT issued (account JIT-provisioned if new).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: Invalid code/state, or token exchange with the IdP failed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sso/social/{provider}/login:
+    get:
+      operationId: startSocialLogin
+      summary: Redirect to a configured social IdP (customer login).
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, example: google, description: "e.g. google, apple — BRD names these as illustrative, not exhaustive" }
+      responses:
+        '302':
+          description: Redirect to the social IdP's OIDC authorization endpoint.
+        '404':
+          description: provider not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/sso/social/{provider}/callback:
+    get:
+      operationId: socialLoginCallback
+      summary: OIDC callback for customer social login.
+      description: >
+        Always resolves to the Customer role only — the social IdP's own
+        claims/groups are never consulted for role elevation
+        (requirement-spec.md §2, resolved Open Question #7). JIT-provisions
+        a Kart account on first login for this external identity
+        (requirement-spec.md §2).
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, example: google }
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Login succeeded — Kart JWT issued with Customer role (account JIT-provisioned if new).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: Invalid code/state, or token exchange with the IdP failed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Internal, service-to-service only (never reachable via the public
+  # Gateway routes a browser/mobile client can reach)
+  # ---------------------------------------------------------------------
+  /internal/users/{userId}/lock:
+    post:
+      operationId: lockUser
+      summary: Lock a user's ability to authenticate.
+      description: >
+        Callable only by Admin Service's client-credentials service
+        principal, Admin-scoped (ADR-0010; requirement-spec.md §2's
+        admin-suspension FR). Never reachable by a Customer- or
+        Support-Agent-scoped token, never exposed through public Gateway
+        routes. Invalidates the locked user's outstanding tokens via the
+        same Redis-backed revocation-list mechanism as logout/role-change
+        (edge-cases.md, "RBAC Role Change Outlives an Already-Minted JWT").
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: User locked; outstanding tokens revoked.
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: userId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /internal/users/{userId}/unlock:
+    post:
+      operationId: unlockUser
+      summary: Restore a locked user's ability to authenticate.
+      description: >
+        Same caller restriction as lock above (ADR-0010; Admin Service's
+        Admin-scoped client-credentials principal only).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: User unlocked.
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: userId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Public key discovery for the Gateway's local JWT signature verification
+  # (RS256 — design-decisions.md, "JWT Signing Algorithm"). Deliberately
+  # unversioned: this is the IANA-registered well-known discovery path
+  # convention, not a versioned business endpoint, and is the only
+  # Gateway->Identity coupling (architecture.md) — cached and infrequent,
+  # not a per-request call.
+  # ---------------------------------------------------------------------
+  /.well-known/jwks.json:
+    get:
+      operationId: getJwks
+      summary: RS256 public-key set for local JWT signature verification.
+      servers:
+        - url: /
+      responses:
+        '200':
+          description: JWKS document (RFC 7517).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { type: object }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Kart-issued RS256 JWT (access token).
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            admin: "Admin-scoped service principal (e.g., Admin Service calling internal lock/unlock)"
+
+  schemas:
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: >
+            RS256-signed JWT. Carries roles/scopes claims resolved at
+            mint time (requirement-spec.md §2's RBAC FR; Domain Invariant,
+            §4 — Identity is the platform's single issuer, every other
+            service a claim consumer only).
+        refreshToken:
+          type: string
+          description: >
+            Single-use, rotated on every /auth/refresh call. Native: 30-day
+            sliding / 90-day absolute cap. Federated (SSO): 24-hour absolute
+            cap, no sliding (requirement-spec.md §4).
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          example: 900
+          description: Access token TTL in seconds (~15 min, requirement-spec.md §3/§4).
+        roles:
+          type: array
+          description: >
+            Platform role vocabulary resolved at mint time
+            (requirement-spec.md §2's RBAC FR, BRD §24.1's four-role
+            table). Also embedded as claims inside accessToken; surfaced
+            here as a convenience for clients that don't decode the JWT.
+          items:
+            type: string
+            enum: [customer, support_agent, admin, partner_api]
+        scopes:
+          type: array
+          items: { type: string }
+
+    ServicePrincipalToken:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: >
+            RS256-signed JWT for a service principal (Client Credentials
+            flow — requirement-spec.md §2). Carries scoped claims (e.g.,
+            Admin-scoped for Admin Service's internal lock/unlock caller)
+            resolved at mint time, same single-issuer rule as TokenPair.
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          description: Short-lived, no refresh token issued for this grant (re-request per standard client-credentials pattern).
+        scopes:
+          type: array
+          items: { type: string }
+
+    MfaChallenge:
+      type: object
+      required: [challengeId, expiresInSeconds]
+      properties:
+        challengeId:
+          type: string
+          description: >
+            Server-side-only state key (edge-cases.md, "Partial-Auth Window
+            During MFA") — no token of any kind is issued for this
+            intermediate state.
+        expiresInSeconds:
+          type: integer
+
+    Problem:
+      type: object
+      description: RFC 7807-style problem details.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: invalid_credentials
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

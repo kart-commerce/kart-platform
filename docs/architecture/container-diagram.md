@@ -31,8 +31,10 @@ graph TB
     Offer -. CouponRedeemed .-> Analytics[kart-analytics-service<br/>Event ingestion + dashboards/funnels]
     Offer -. PriceQuoteIssued .-> Analytics
     Offer -. PromotionActivated .-> Analytics
+    Offer -. PromotionDeactivated .-> Analytics
     Product -. ProductCreated .-> Analytics
     Product -. ProductPriceChanged .-> Analytics
+    Product -. ProductUpdated .-> Analytics
     Product -. ProductPriceChanged .-> Wishlist
     Wishlist -->|"sync, GET /products/{id}, hourly reconciliation job only — not on the /wishlist request path"| Product
 
@@ -86,9 +88,22 @@ graph TB
     DeliveryTracking -->|"sync, per-carrier polling fallback, 6h staleness threshold, circuit breaker + bulkhead"| CarrierAPI[Carrier tracking APIs<br/>external, per-carrier, not a Kart service]
     DeliveryTracking -. "DeliveryStatusUpdated (terminal delivered status only)" .-> Order
     DeliveryTracking -. DeliveryStatusUpdated .-> Analytics
-    Identity[Identity Service]
+    Identity[kart-identity-service<br/>AuthN + Tokens + Sessions + MFA + RBAC + SSO]
     UserSvc[User Service]
     Notification[kart-notification-service<br/>Email/SMS/Push fan-out, consumer-only]
+    EnterpriseIdP[Enterprise IdP<br/>Okta / Azure AD / Google Workspace, external]
+    SocialIdP[Social IdP<br/>Google / Apple, external]
+
+    GW -->|"sync REST: /auth/login, /auth/refresh, /auth/logout, /auth/mfa/verify, /auth/password/reset-initiate, /auth/password/reset-confirm"| Identity
+    GW -->|"sync, cached JWKS public-key retrieval, not a per-request call"| Identity
+    Identity -->|"sync, SAML AuthnRequest / OIDC authorization request, per-IdP bulkhead"| EnterpriseIdP
+    EnterpriseIdP -.->|"sync, inline browser redirect: SAML ACS / OIDC callback"| Identity
+    Identity -->|"sync, OIDC authorization request, own bulkhead group"| SocialIdP
+    SocialIdP -.->|"sync, inline browser redirect: OIDC callback, resolves to Customer role only"| Identity
+    Identity -. UserRegistered .-> UserSvc
+    Identity -. UserRegistered .-> Analytics
+    Identity -. SessionCreated .-> Analytics
+    Identity -. UserAccountUpdated .-> UserSvc
 
     Category -. CategoryUpdated .-> Analytics
 
@@ -110,7 +125,8 @@ graph TB
     Wishlist -. WishlistPriceAlertTriggered .-> Analytics
     Identity -. UserRegistered .-> Notification
     UserSvc -. UserNotificationPreferenceUpdated .-> Notification
+    UserSvc -. UserDataErased .-> Analytics
     Notification -. NotificationSent .-> Analytics
 ```
 
-_Placed so far: `kart-offer-service`, `kart-review-service`, `kart-cart-service`, `kart-notification-service`, `kart-inventory-service`, `kart-recommendation-service`, `kart-admin-service`, `kart-payment-service`, `kart-category-service`, `kart-shipping-service`, `kart-delivery-tracking-service` — this diagram grows as each subsequent service goes through the Architecture Agent. Nodes for Wishlist/Identity/User are stubbed in only as edge endpoints here; their own boundary/dependency detail is added when each passes through this agent in turn. `CarrierWebhook`/`CarrierAPI` are external, non-Kart systems (per-carrier third parties), not bounded contexts of this platform — shown only because they are Delivery Tracking's largest integration surface._
+_Placed so far: `kart-offer-service`, `kart-review-service`, `kart-cart-service`, `kart-notification-service`, `kart-inventory-service`, `kart-recommendation-service`, `kart-admin-service`, `kart-payment-service`, `kart-category-service`, `kart-shipping-service`, `kart-delivery-tracking-service`, `kart-product-service`, `kart-wishlist-service`, `kart-identity-service`, `kart-user-service`, `kart-search-service`, `kart-analytics-service` — this note was stale (missing the last six) until corrected during `kart-analytics-service`'s own Architecture Agent pass; this diagram grows as each subsequent service goes through the Architecture Agent. Only `kart-order-service` has not yet passed through this stage. `CarrierWebhook`/`CarrierAPI` are external, non-Kart systems (per-carrier third parties), not bounded contexts of this platform — shown only because they are Delivery Tracking's largest integration surface._
