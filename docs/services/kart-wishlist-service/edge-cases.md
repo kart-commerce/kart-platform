@@ -1,7 +1,7 @@
 ---
 doc_type: edge-cases
 service: kart-wishlist-service
-status: pending-approval
+status: approved
 generated_by: edge-case-analyzer-agent
 source: docs/services/kart-wishlist-service/requirement-spec.md
 ---
@@ -48,3 +48,23 @@ source: docs/services/kart-wishlist-service/requirement-spec.md
   - Chosen: unresolved — escalate.
   - Why: the threshold value itself is a product/business call (what % drop is "worth" alerting a user), not an engineering default this agent can pick.
   - Trade-off accepted: none picked — flagged under requirement-spec Q2 for human resolution before the Architecture Agent designs around a specific number.
+
+## Edge Case: Price Rebound During the Batching/Digest Window
+
+- **What happens:** A price drop is detected and queued for per-user digest delivery under the batching window chosen as this file's own Alert Storm mitigation; before that window elapses and the notification actually sends, the price rebounds — either back to/above its pre-drop level, or drops further and then partially recovers — so the notification the user eventually receives cites an `oldPrice`/`newPrice` pair that is no longer true at delivery time.
+- **Why it happens:** The domain invariant that `WishlistPriceAlertTriggered` must reflect the actual current price "at trigger time, not a stale cached price" (requirement-spec §4) only constrains the moment of trigger/publish; it says nothing about the gap between trigger and actual delivery to the user. That gap did not exist as a distinct race until this file's own "Alert Storm on Sitewide Price Drop" edge case introduced a per-user batching/digest window as the chosen mitigation — the batching window itself is what creates the race between a price that was true when captured and a price that may no longer be true by the time the digest is delivered. This is distinct from "Duplicate Alert Delivery from At-Least-Once Redelivery" above: that edge case is about the same event being redelivered and reprocessed; this one is about a single, correctly-processed alert going stale between trigger and delivery purely because of the batching delay.
+- **Solutions available (3):** re-check the current price against the latest known price state immediately before digest send, and suppress the alert if the price has rebounded to/above the baseline it was triggered on · re-check at send time and, if rebounded, still send the digest but with corrected current-price content rather than the originally captured `oldPrice`/`newPrice` · do nothing — accept the batching window's inherent staleness risk as a known consequence of the Alert Storm decision, and deliver the digest with whatever price was true at trigger time regardless of what happens before delivery.
+- **Decision (3-5 bullets max):**
+  - Chosen: unresolved — escalate.
+  - Why: whether a stale-by-delivery alert should be suppressed, corrected, or delivered as originally triggered is a product decision about what users expect from a "price-drop alert" (accuracy vs. simplicity vs. the added latency/complexity of a pre-send re-check) — not an engineering default this agent can pick, and the requirement-spec's trigger-time invariant (§4) does not extend to cover delivery-time accuracy.
+  - Trade-off accepted: none picked — flagged for human resolution before the Architecture Agent designs the digest-send path, since the answer determines whether a price re-check needs to be part of that path at all, and how it should be implemented if so.
+
+## Edge Case: Wishlist Entry Added After the Price Drop Already Happened
+
+- **What happens:** A user adds a product to their wishlist after a `ProductPriceChanged` event for that product has already fired and already been processed for every user who had it wishlisted at that time. The newly-added entry did not exist when the event fired, so it is unclear whether this user should receive a retroactive alert for a drop that already happened, or whether their entry only starts reacting to price changes from the moment it is added, forward.
+- **Why it happens:** The Price-Drop Alerts FR (requirement-spec §2) states only that Wishlist "consumes `ProductPriceChanged` to detect price movement on wishlisted products" — an event-driven, forward-looking consumption model with no stated temporal scope. Neither this FR nor any domain invariant in §4 defines what a wishlist entry's price baseline is at add-time, or whether Wishlist should look backward at prior `ProductPriceChanged` events for a product once a new entry starts watching it. This is a real product/UX question the BRD does not address at any level.
+- **Solutions available (3):** no backfill — the entry's baseline is the price at add-time; only `ProductPriceChanged` events after that timestamp are evaluated for this user/SKU, matching the FR's literal forward-consumption model · retroactive backfill — at add-time, compare the current price against a reference price (e.g., the product's price immediately before its most recent drop) and immediately fire `WishlistPriceAlertTriggered` if the product is already discounted relative to that reference · read-time-only surfacing — show the product's current discount as UI state at the moment of add (e.g., an "already on sale" badge) without publishing a retroactive alert event at all.
+- **Decision (3-5 bullets max):**
+  - Chosen: unresolved — escalate.
+  - Why: this is a genuine product/UX call about what users expect when they wishlist something already on sale — over-notifying (backfill) risks alert fatigue and inflates alert volume in a way the "Alert Storm" mitigation above wasn't sized for, while under-notifying (no backfill) risks a user missing a live discount the platform already knows about; the BRD and requirement-spec are silent on baseline-price semantics at add-time, so neither reading is a defensible engineering default.
+  - Trade-off accepted: none picked — flagged for human resolution before the Architecture/DDD Agent stages model what a wishlist entry actually stores (e.g., whether a "price at add-time" needs to be a captured field at all).

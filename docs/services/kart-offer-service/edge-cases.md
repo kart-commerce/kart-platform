@@ -1,7 +1,7 @@
 ---
 doc_type: edge-cases
 service: kart-offer-service
-status: pending-approval
+status: approved
 generated_by: edge-case-analyzer-agent
 source: docs/services/kart-offer-service/requirement-spec.md
 ---
@@ -28,6 +28,16 @@ source: docs/services/kart-offer-service/requirement-spec.md
   - Why: Coupon/Pricing/Promotion is an explicitly low-write-volume path (database-design.md: "far lower write volume than Order/Payment... writes only happen once per checkout"), so per-code lock contention is acceptable; mirrors the platform's existing oversell-prevention pattern that the requirement-spec itself draws the analogy to.
   - Trade-off accepted: Redemptions against the same code serialize — a single high-traffic flash-sale coupon becomes a throughput bottleneck under heavy concurrency; acceptable given the stated write-volume profile, revisit if that scenario materializes.
 
+## Edge Case: Coupon — Validity window expires while checkout is in flight
+
+- **What happens:** `/coupons/validate` accepts a coupon because the check runs inside `RedemptionLimit.validityWindow`, but the actual redemption write (triggered when the checkout/order transaction that uses it finally commits) happens after `validityWindow` has ended — the coupon was valid when checkout began, expired before checkout finished.
+- **Why it happens:** ddd-model.md's `Coupon` aggregate states the invariant as a redemption-time check, not a quote/lock-in guarantee: "Redemption is only valid within `RedemptionLimit.validityWindow`" — validation and redemption are two separate calls separated by however long checkout takes (client think-time, payment processing, Saga latency), and nothing snapshots eligibility between them the way `PricingQuote` snapshots price.
+- **Solutions available (3):** Re-check `validityWindow` inside the same locked transaction as the redemption insert (the existing `SELECT ... FOR UPDATE` transaction from the redemption-cap race above already holds the row; extend its check), rejecting with a specific "coupon expired" error if the window has closed · Snapshot eligibility at `/coupons/validate` time and honor it through redemption regardless of window closure in between · Silently drop the coupon and let the order proceed at full price without surfacing an error.
+- **Decision:**
+  - Chosen: Re-check `validityWindow` inside the same locked transaction as the redemption insert; reject with a specific "coupon expired" error (not a generic failure) if the window has closed by the time the redemption write executes.
+  - Why: ddd-model.md's invariant is worded as a redemption-time constraint ("Redemption is only valid within `RedemptionLimit.validityWindow`"), not a validate-time-lock-in guarantee — unlike `PricingQuote`, no aggregate or value object gives `Coupon` a snapshot-and-honor semantic, so enforcing strictly at the moment of the write is the only reading the stated invariant supports; this also reuses the transaction the redemption-cap race edge case (above) already opens, at no extra locking cost.
+  - Trade-off accepted: A customer who saw a valid discount at checkout start can lose it if checkout crosses the validity-window boundary before the redemption write commits — this is accepted as the direct, literal consequence of the invariant as stated, not a gap; if product later wants quote-style lock-in for coupons, that requires a new modeling decision upstream (ddd-model.md), not a silent fix here.
+
 ## Edge Case: Pricing — `ProductPriceChanged` arrives mid-quote-computation
 
 - **What happens:** `ProductPriceChanged` is being applied to Offer's locally materialized price data at the same moment `/pricing/quote` reads that SKU's price, or the event simply hasn't been consumed yet when the quote is issued.
@@ -38,15 +48,26 @@ source: docs/services/kart-offer-service/requirement-spec.md
   - Why: `PricingQuote`'s invariant (ddd-model.md) only requires the quote to reflect the product price "at the moment of quoting," and a quote is an immutable snapshot, never retroactively recomputed — whichever price value the read observes (pre- or post-update) satisfies the invariant by construction, and a single-row read/write is already atomic.
   - Trade-off accepted: A quote can be issued moments before a price change lands, leaving a soon-to-be-stale price live until the quote's TTL expires (15 min, ddd-model.md Modeling Decision #2) — this is the pre-accepted cost of the no-sync-fanout architecture, not a new risk.
 
+## Edge Case: Pricing — Expired `PricingQuote` reused at checkout
+
+- **What happens:** A `PricingQuote` issued by `/pricing/quote` is presented at checkout (cart left idle, slow client, long Saga step) after its 15-minute TTL (ddd-model.md Modeling Decision #2) has elapsed, and checkout attempts to consume/finalize against it as if it were still current.
+- **Why it happens:** ddd-model.md's `PricingQuote` invariant states this outcome explicitly as a hard rule: "A quote expires after a TTL... an expired quote must be re-issued, not reused, at checkout." A quote is an immutable snapshot with no push-based invalidation to the client holding it — nothing stops a client from submitting an expired `quoteId` at the moment of commit.
+- **Solutions available (3):** Reject at consumption time — check `issuedAt + TTL` against current time when the quote is presented at checkout, return a specific "quote expired, re-quote required" error · Silently re-issue a fresh quote server-side under the same `quoteId` and proceed with the new totals · Accept it anyway within a small grace window past the nominal TTL.
+- **Decision:**
+  - Chosen: Reject at consumption time and require the client to call `/pricing/quote` again for a fresh snapshot; no silent re-issue and no grace window.
+  - Why: ddd-model.md's invariant leaves no discretion — "must be re-issued, not reused" is stated as a hard rule, not an open question — and silently re-issuing behind the same `quoteId` would violate the aggregate's other stated invariant that a quote is "immutable once issued... never recomputed retroactively" (ddd-model.md, Aggregate: `PricingQuote`); rejecting and forcing an explicit re-quote is the only option consistent with both invariants at once.
+  - Trade-off accepted: A customer whose checkout crosses the 15-minute TTL boundary must re-request a quote and may see a different price/promotion than the one that expired — this friction is the intended effect of the TTL (preventing stale-price honoring), not a defect; a UX-level grace window could be proposed later without contradicting the invariant, but that is a new modeling decision for ddd-model.md, not a default assumed here.
+
 ## Edge Case: Promotion — Stale Redis cache vs. an actively-changing campaign
 
 - **What happens:** `/promotions/active` and `/pricing/quote`'s in-process promotion read (both ultimately served by Redis-cached reads over `promotion_campaigns`, per database-design.md) return a campaign that has already ended, or omit one that just started, for the span of the cache's staleness window.
-- **Why it happens:** Redis is a cache-aside layer over PostgreSQL; a `PromotionActivated`/`PromotionDeactivated` write to `promotion_campaigns` does not itself invalidate the cache — only TTL expiry or an explicit invalidation does, and the two aren't coupled by default.
+- **Why it happens:** A `PromotionActivated`/`PromotionDeactivated` write to `promotion_campaigns` does not itself guarantee the Redis-cached read reflects it immediately, unless the cache write is made part of the same operation as the DB write.
 - **Solutions available (3):** TTL-only expiry · Event-driven invalidation (Offer consumes its own `PromotionActivated`/`PromotionDeactivated` to bust the affected cache key immediately) · Write-through cache (update Redis synchronously in the same transaction as the Postgres write).
 - **Decision:**
-  - Chosen: Event-driven invalidation on `PromotionActivated`/`PromotionDeactivated`, with a short TTL (seconds) as a backstop.
-  - Why: requirement-spec §3's NFR table sets the bound explicitly — "Promotion staleness of seconds is tolerable" — event-driven invalidation handles the common case immediately, and the short TTL caps the worst case (a lost/delayed self-consumed event) at that same tolerance, without write-through's added write-path latency/complexity.
-  - Trade-off accepted: A brief staleness window (bounded by the TTL) still exists between campaign start/end and cache reflection — acceptable per the stated NFR and consistent with the platform's at-least-once/idempotent-consumer posture.
+  - Contradiction identified: Two upstream, approved documents disagree on this exact field class. requirement-spec §3's NFR table states, for the Consistency attribute: "Eventual for Promotion (Redis cache)... Promotion staleness of seconds is tolerable" — implying a cache-aside-family pattern (TTL and/or event-driven invalidation) is sufficient. BRD §16's Caching table states, unconditionally: "Write-Through | Promotion/active-campaign flags | Write updates Redis and DB synchronously since staleness there is unacceptable for pricing" — ruling out cache-aside-family patterns for this exact field class. These cannot both govern.
+  - Chosen: Write-through cache — update Redis synchronously in the same transaction/operation as the PostgreSQL write to `promotion_campaigns`, superseding the previously-chosen event-driven-invalidation-plus-TTL approach.
+  - Why: BRD §16 governs over requirement-spec §3's row. §16 is the specific, deliberate rule for exactly this field class — the BRD itself confirms it's intentional, not incidental, by posing "Why cache-aside for products but write-through for promotions?" as a named interview question (BRD §16 area) — whereas requirement-spec §3's Consistency row reads as inherited from the BRD's generic global Consistency guidance without cross-referencing §16's specific carve-out for pricing-sensitive flags. This is a defensible engineering default, not a business/product judgment call: §16 leaves no discretion about whether staleness is tolerable here, so there is no revenue/policy trade-off to escalate. This also matches the platform's existing precedent: kart-product-service/edge-cases.md's "Read-model staleness after a price change" edge case made the identical write-through call under the identical BRD §16 clause for the identical class of field (pricing-sensitive), and Offer should not diverge from that precedent for the same BRD rule.
+  - Trade-off accepted: Added write-path latency on every write to `promotion_campaigns` (Redis and Postgres now committed together, instead of a fire-and-forget async invalidation) versus the lower-latency event-driven approach previously chosen; accepted because BRD §16 treats promotion/pricing staleness as categorically unacceptable, not as a latency/complexity trade left open for this service to optimize. requirement-spec §3's Consistency row should be corrected in a future revision to stop stating a bound §16 forbids — flagged here, not silently fixed upstream by this document.
 
 ## Edge Case: Promotion + Coupon — Discount stacking on the same quote
 
