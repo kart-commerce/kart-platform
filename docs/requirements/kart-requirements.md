@@ -55,9 +55,7 @@ Most tutorial e-commerce projects stop at CRUD + one database. That teaches almo
 |7|Cart Service|Cart lifecycle, merge, expiry|
 |8|Order Service|Order lifecycle, order state machine|
 |9|Payment Service|Payment intents, gateways, refunds|
-|10|Coupon Service|Coupon issuance, redemption, limits|
-|11|Pricing Service|Price computation, tax, currency|
-|12|Promotion Service|Campaigns, flash sales, bundle deals|
+|10–12|Offer Service (Coupon + Pricing + Promotion merge, see `kart-platform` ADR-0001)|Coupon issuance/redemption/limits; price computation, tax, currency; campaigns, flash sales, bundle deals — one bounded context, three aggregate roots (`Coupon`, `PricingQuote`, `PromotionCampaign`), not three separate day-one repos|
 |13|Wishlist Service|Saved items, price-drop alerts|
 |14|Review Service|Ratings, reviews, moderation|
 |15|Notification Service|Email/SMS/push fan-out|
@@ -66,6 +64,8 @@ Most tutorial e-commerce projects stop at CRUD + one database. That teaches almo
 |18|Recommendation Service|Personalization, "customers also bought"|
 |19|Analytics Service|Event ingestion, dashboards, funnels|
 |20|Admin Service|Back-office operations, RBAC|
+
+**Note on service count**: this table names 20 BRD-level service *concerns*, but items 10–12 (Coupon/Pricing/Promotion) are merged into a single deployable repo, `kart-offer-service`, per ADR-0001 — so the platform ships **18 deployable service repos**, not 20. Item numbers 10–12 are retained as a single merged row (rather than renumbering 13–20) so existing citations to items 13–20 elsewhere in this document and in downstream design docs stay valid.
 
 ### 2.2 Domain Rules That Force Hard Engineering Decisions
 
@@ -184,9 +184,7 @@ Each service below follows the same template: **Responsibility → API → Datab
 |Category|`/categories`|PostgreSQL|`CategoryUpdated`|—|
 |Search|`/search` (query only)|MongoDB / OpenSearch|—|`ProductCreated`, `ProductPriceChanged`|
 |Cart|`/cart`, `/cart/merge`|Redis + PostgreSQL snapshot|`CartCheckedOut`|`InventoryReservationFailed`|
-|Coupon|`/coupons/validate`|PostgreSQL|`CouponRedeemed`|`OrderCancelled`|
-|Pricing|`/pricing/quote`|PostgreSQL|`PriceQuoteIssued`|`ProductPriceChanged`|
-|Promotion|`/promotions/active`|PostgreSQL → Redis cache|`PromotionActivated`|—|
+|Offer (Coupon+Pricing+Promotion merge, see `kart-platform` ADR-0001)|`/coupons/validate`, `/pricing/quote`, `/promotions/active`|PostgreSQL (+ Redis cache for Promotion's active-campaign reads)|`CouponRedeemed`, `PriceQuoteIssued`, `PromotionActivated`|`ProductPriceChanged` (Pricing sub-context reacts to catalog price moves when computing quotes — Product is the publisher, see §10), `OrderCancelled` (Coupon sub-context, releases a redemption hold)|
 |Wishlist|`/wishlist`|MongoDB|`WishlistPriceAlertTriggered`|`ProductPriceChanged`|
 |Review|`/reviews`|PostgreSQL → MongoDB read|`ReviewSubmitted`|`OrderDelivered` (canonical name — see ADR-0005)|
 |Notification|(consumer only, no public API)|PostgreSQL (audit)|`NotificationSent`|All `order.*` and `payment.*` routed events (per §9's manifest), plus `WishlistPriceAlertTriggered`, `UserRegistered`, `OrderDelivered` — resolved scope, see ADR-0003; §10 lists the full resolved consumer set per event|
@@ -404,18 +402,24 @@ Application startup reads a JSON manifest and declares all RabbitMQ topology ide
 |`ShipmentDispatched`|Shipping|Order, Notification, Tracking, Analytics|orderId, carrier, trackingId|3x|`shipping.dlq`|
 |`DeliveryStatusUpdated`|Delivery Tracking|Order (terminal status only), Notification, Analytics|trackingId, status|3x|`tracking.dlq`|
 |`ProductCreated`|Product|Search, Recommendation, Analytics|sku, attributes|3x|`catalog.dlq`|
-|`ProductPriceChanged`|Pricing|Search, Wishlist, Analytics|sku, oldPrice, newPrice|3x|`catalog.dlq`|
+|`ProductPriceChanged`|Product|Search, Wishlist, Offer, Analytics|sku, oldPrice, newPrice|3x|`catalog.dlq`|
 |`ReviewSubmitted`|Review|Product (rating recalc), Analytics|orderId, sku, rating|2x|`review.dlq`|
-|`CouponRedeemed`|Coupon|Order, Analytics|code, orderId|2x|`coupon.dlq`|
+|`CategoryUpdated`|Category|Analytics|categoryId, name|3x|`catalog.dlq`|
+|`CouponRedeemed`|Offer|Order, Analytics|code, orderId|2x|`coupon.dlq`|
+|`PriceQuoteIssued`|Offer|Analytics|quoteId, sku, finalPrice|2x|`coupon.dlq`|
+|`PromotionActivated`|Offer|Analytics|campaignId, sku, discount|2x|`coupon.dlq`|
+|`UserProfileUpdated`|User|Analytics|userId, changedFields|2x|`user.dlq`|
 |`NotificationSent`|Notification|Analytics|userId, channel, status|1x (fire-and-forget audit)|`notification.dlq`|
 |`CartCheckedOut`|Cart|Analytics (funnel/conversion tracking)|cartId, userId, items|2x|`cart.dlq`|
 |`WishlistPriceAlertTriggered`|Wishlist|Notification, Analytics|userId, sku, oldPrice, newPrice|2x|`wishlist.dlq`|
 |`AdminActionPerformed`|Admin|Analytics (audit trail)|adminId, action, entityId|1x (fire-and-forget audit)|`admin.dlq`|
 |`UserRegistered`|Identity|User, Notification, Analytics|userId, email|3x|`identity.dlq`|
 |`SessionCreated`|Identity|Analytics|userId, sessionId|2x|`identity.dlq`|
-|`UserAccountUpdated`|Identity|User|userId, email, displayName|2x|`identity.dlq`|
+|`UserAccountUpdated`|Identity|User, Analytics|userId, email, displayName|2x|`identity.dlq`|
 
-_Money-moving events (`Payment*`, `RefundIssued`) get the highest retry budget and human paging; catalog/search events get looser retry because staleness is tolerable for seconds. This table was extended to close two categories of gap found during platform review (see `kart-platform/docs/adr/0002-*.md` through `0007-*.md`): (1) events named in a service's own row (§5.4) that had no Event Catalog entry at all — `OrderCompensationTriggered`, `InventoryReleased`, `InventoryReplenished`, `RefundIssued`, `CartCheckedOut`, `WishlistPriceAlertTriggered`, `AdminActionPerformed`, `UserRegistered`, `SessionCreated` — and (2) two genuinely ambiguous consumer-scope questions (Notification's actual consumed-event set, Analytics' actual ingestion scope) that were resolved rather than left to each service to guess independently. `OrderDelivered` and `UserAccountUpdated` are new events, not previously named anywhere in the BRD — see ADR-0005 and ADR-0006 respectively for why they were needed._
+_Money-moving events (`Payment*`, `RefundIssued`) get the highest retry budget and human paging; catalog/search events get looser retry because staleness is tolerable for seconds. This table was extended to close two categories of gap found during platform review (see `kart-platform/docs/adr/0002-*.md` through `0007-*.md`): (1) events named in a service's own row (§5.4) that had no Event Catalog entry at all — `OrderCompensationTriggered`, `InventoryReleased`, `InventoryReplenished`, `RefundIssued`, `CartCheckedOut`, `WishlistPriceAlertTriggered`, `AdminActionPerformed`, `UserRegistered`, `SessionCreated` — and (2) two genuinely ambiguous consumer-scope questions (Notification's actual consumed-event set, Analytics' actual ingestion scope) that were resolved rather than left to each service to guess independently. `OrderDelivered` and `UserAccountUpdated` are new events, not previously named anywhere in the BRD — see ADR-0005 and ADR-0006 respectively for why they were needed.
+
+A second review pass (see `kart-platform/docs/adr/0008-*.md`) found this table still incomplete after ADR-0007: four more events named as a service's own Publish in §5.4 had no row at all — `CategoryUpdated`, `PriceQuoteIssued`, `PromotionActivated`, `UserProfileUpdated` — now added above with Analytics as the only consumer per ADR-0004's stated default ("every future new event automatically has Analytics as a consumer"); whether any other service also needs to consume them is not resolved here and is not assumed. The same pass found `UserAccountUpdated`'s row violated that same ADR-0004 default (Analytics was missing) — fixed above. It also found `ProductPriceChanged`'s Publisher was still listed as "Pricing" here even though §5.4's Product row states Product publishes it and ADR-0001 explicitly left this contradiction open pending `kart-offer-service`'s own resolution (Product publishes; Pricing/Offer only consumes) — that resolution is now applied directly here, with Offer added to the consumer list since §5.4's Offer row states it consumes this event. `ProductUpdated` (named only in §16's caching prose, never in Product's own Publishes list at §5.4) remains a deliberately unresolved ambiguity — see `kart-platform/docs/services/kart-product-service/requirement-spec.md` Open Question #6 — not silently added as a new catalog row here._
 
 ---
 
@@ -478,7 +482,8 @@ sequenceDiagram
     Order->>Order: Mark OrderConfirmed
 ```
 
-_Integration style note (resolves the apparent sync-call reading of this diagram — see ADR-0002 in `kart-platform`): every arrow above is async pub/sub over the message bus, not synchronous RPC — the same request/reply notation is used for the Payment step too, and Payment is unambiguously stated as async in §5.1's Dependencies row, so the notation itself carries no sync/async meaning, only causal order. `OrderConfirmed` is published as soon as Payment clears (before Shipping has actually created anything) — Shipping is an async consumer of `OrderConfirmed`, exactly as §5.4/§10 state — and `ShipmentDispatched` flows back to Order purely as an informational status update. "Order->>Order: Mark OrderConfirmed" as the last line is diagram shorthand for "the happy path completed end-to-end," not a literal publish-order requirement that confirmation waits on shipment creation._
+_Integration style note (resolves the apparent sync-call reading of this diagram for the Payment→Shipping portion — see ADR-0002 in `kart-platform`; the Inventory step is excluded from this note, see below): from the `Order->>Payment: Charge` arrow onward, every arrow is async pub/sub over the message bus, not synchronous RPC — the same request/reply notation is used for the Payment step, and Payment is unambiguously stated as async in §5.1's Dependencies row, so the notation itself carries no sync/async meaning for those steps, only causal order. `OrderConfirmed` is published as soon as Payment clears (before Shipping has actually created anything) — Shipping is an async consumer of `OrderConfirmed`, exactly as §5.4/§10 state — and `ShipmentDispatched` flows back to Order purely as an informational status update. "Order->>Order: Mark OrderConfirmed" as the last line is diagram shorthand for "the happy path completed end-to-end," not a literal publish-order requirement that confirmation waits on shipment creation.
+`Order->>Inventory: Reserve stock` / `Inventory-->>Order: InventoryReserved` (the first two arrows) are the one exception this note does **not** cover: §5.1's Dependencies row states this call is synchronous ("sync reserve call + async confirm") and §5.2 gives it a REST API shape (`POST /inventory/reserve`), consistent with the diagram's literal reading — a genuinely synchronous RPC, not async pub/sub, with `InventoryReserved` published afterward for the async saga-advancement side of that same step (see `kart-platform` ADR-0009, which narrows ADR-0002's original note — ADR-0002 was scoped to Order↔Shipping only, but this note's prior wording ("every arrow above") had overreached to imply the Inventory step too, contradicting §5.1/§5.2)._
 
 ### 12.2 Order Saga — Failure & Compensation Flow
 
@@ -640,7 +645,7 @@ Nginx sits in front of the gateway for TLS termination, static asset serving, an
 
 ### 24.1 Cross-Cutting RBAC Model
 
-RBAC is a platform-wide concern, not an Admin Service–local feature — every one of the 20 services trusts the same role claims rather than maintaining its own permission table. Identity Service is the single issuer of roles; every other service is a **consumer** of the claim, never a second source of truth for "who can do what."
+RBAC is a platform-wide concern, not an Admin Service–local feature — every one of the 18 deployable services trusts the same role claims rather than maintaining its own permission table. Identity Service is the single issuer of roles; every other service is a **consumer** of the claim, never a second source of truth for "who can do what."
 
 |Role|Scope|Example Grant|
 |---|---|---|
@@ -651,7 +656,7 @@ RBAC is a platform-wide concern, not an Admin Service–local feature — every 
 
 - **Issuance**: Identity Service resolves a user/service-principal to a role set at token-mint time and embeds it as a scoped claim in the JWT (`roles: [...]`, `scopes: [...]`) — this is the same JWT already described in §24 AuthZ, not a separate token.
 - **Enforcement**: checked twice — coarse-grained at the API Gateway (§18, reject before the request reaches a service) and fine-grained again at the owning service (e.g., "Support Agent can refund, but only up to $X" is a business rule Payment Service enforces itself, since the gateway cannot know the order total).
-- **Why not per-service role tables**: with 20 independently-deployed services, a locally-defined role table per service silently drifts (Admin's "Support" role and Order's "Support" role diverge in meaning within a year). One issuer + one claim shape is what makes RBAC auditable across the whole platform.
+- **Why not per-service role tables**: with 18 independently-deployed services, a locally-defined role table per service silently drifts (Admin's "Support" role and Order's "Support" role diverge in meaning within a year). One issuer + one claim shape is what makes RBAC auditable across the whole platform.
 
 ### 24.2 SSO / Identity Federation
 
@@ -699,7 +704,7 @@ Federation is terminated entirely at Identity Service — it exchanges the exter
 2. How would you decide a service boundary in general?
 3. What's the risk of an "Order Service" that directly calls Payment synchronously for everything?
 4. Why is Order the Saga orchestrator instead of a separate "Orchestrator Service"?
-5. When would you choose a monolith over these 20 services?
+5. When would you choose a monolith over these 18 services (20 BRD-level concerns, merged into 18 deployable repos per ADR-0001)?
 
 **CQRS & Data** 6. Why is PostgreSQL the write store and MongoDB the read store here? 7. What breaks if the Outbox poller goes down for an hour? 8. How do you rebuild a MongoDB read model from scratch? 9. Why denormalize category name into the product read model instead of joining? 10. What's the risk of eventual consistency on the search index for a price change? 11. How would you shard MongoDB differently if products were region-specific? 12. Why partition PostgreSQL `orders` by month instead of by user ID range?
 
@@ -717,7 +722,7 @@ Federation is terminated entirely at Identity Service — it exchanges the exter
 
 **Security** 43. Why validate JWT at the gateway _and_ re-check scopes at the service? 44. Why does Payment never store raw card data? 45. Design the idempotency key mechanism end-to-end for charge requests.
 
-**Observability** 46. Why is structured logging necessary for a system with 20 services? 47. How would you trace a single slow order across 8 services? 48. What business metrics would you alert on, versus purely technical metrics?
+**Observability** 46. Why is structured logging necessary for a system with 18 services? 47. How would you trace a single slow order across 8 services? 48. What business metrics would you alert on, versus purely technical metrics?
 
 _(Questions 49–100 follow the same structure across DevOps/Kubernetes, Search/Recommendation, Notification fan-out design, database indexing trade-offs, rate limiting algorithms, and multi-region/DR scenarios — generate additional questions by taking any section 5–26 heading and asking "why this, and what's the alternative?")_
 
