@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/kakon/Developer/Personal/agent-reusables/agents/**)",
+      "Read(//home/kakon/Developer/Personal/agent-reusables/docs/standards/**)",
+      "Read(//home/kakon/Developer/Personal/**)"
+    ]
+  }
+}

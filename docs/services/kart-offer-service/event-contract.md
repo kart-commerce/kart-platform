@@ -14,9 +14,9 @@ Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-con
 |---|---|---|---|---|---|---|
 | `CouponRedeemed` | `offer.coupon.redeemed` | Published (Order, Analytics) | `code`, `orderId` | 2x | `offer.coupon-redeemed.dlq` | See below — resolved, not `Payment*` tier |
 | `CouponRedemptionVoided` | `offer.coupon.redemption-voided` | Published (Analytics) | `code`, `orderId`, `voidedAt` | 2x | `offer.coupon-redemption-voided.dlq` | Same justification as `CouponRedeemed` — symmetric event, symmetric tier |
-| `PriceQuoteIssued` | `offer.pricing.quote-issued` | Published (consumer unconfirmed) | `quoteId`, `total`, `expiresAt` | 3x | `offer.quote-issued.dlq` | Standard tier — catalog/read-path event, no money movement |
-| `PromotionActivated` | `offer.promotion.activated` | Published (consumer unconfirmed) | `campaignId`, `window` | 3x | `offer.promotion-activated.dlq` | Standard tier |
-| `PromotionDeactivated` | `offer.promotion.deactivated` | Published (consumer unconfirmed) | `campaignId` | 3x | `offer.promotion-deactivated.dlq` | Standard tier |
+| `PriceQuoteIssued` | `offer.pricing.quote-issued` | Published (Analytics) | `quoteId`, `total`, `expiresAt` | 2x | `offer.quote-issued.dlq` | Standard tier, matching BRD §10's assigned tier (2x) per ADR-0008 — own DLQ per the reusable event standard's "never shared" rule (event-standards.md), rather than BRD §10's simplified shared `coupon.dlq` label |
+| `PromotionActivated` | `offer.promotion.activated` | Published (Analytics) | `campaignId`, `window` | 2x | `offer.promotion-activated.dlq` | Standard tier, matching BRD §10's assigned tier (2x) per ADR-0008 — own DLQ per the reusable event standard |
+| `PromotionDeactivated` | `offer.promotion.deactivated` | Published (Analytics) | `campaignId` | 2x | `offer.promotion-deactivated.dlq` | Not in BRD §10 (new event, symmetric counterpart to `PromotionActivated`) — same tier as its sibling, same Analytics-only consumer resolution |
 | `ProductPriceChanged` | `product.price.changed` | Consumed (from Product) | `sku`, `oldPrice`, `newPrice` | — (consumer side) | — | N/A — Product owns retry/DLQ for its own publication |
 | `OrderCancelled` | `order.order.cancelled` | Consumed (from Order) | `orderId`, `reason` | — (consumer side) | — | N/A — Order owns retry/DLQ for its own publication |
 

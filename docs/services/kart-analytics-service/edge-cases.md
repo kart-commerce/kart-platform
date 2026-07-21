@@ -14,10 +14,9 @@ source: docs/services/kart-analytics-service/requirement-spec.md
 - **Why it happens:** Requirement-spec Domain Invariant #1 asserts schema versioning discipline is forced on Analytics (BRD §2.2), but no compatibility scheme or registry is defined anywhere in the BRD — nothing gates a publisher from shipping a breaking change before it reaches Analytics.
 - **Solutions available (3):** Schema registry with enforced backward/forward compatibility checks at publish time (e.g. Avro/Protobuf + compatibility mode) · Consumer-side tolerant reader (ignore unknown fields, default missing ones) with dead-lettering on unparseable payloads · Contract tests between publisher and Analytics gating CI/CD on schema diff
 - **Decision (3-5 bullets max):**
-  - Chosen: Schema registry with enforced backward-compatible-only mode as the primary gate, plus a consumer-side tolerant reader as defense in depth.
-  - Why: Requirement-spec calls this a *forced* discipline, not an optional nicety — only a registry stops a bad change before it ships, versus catching it only after Analytics already broke.
-  - Trade-off accepted: Every publisher now owns a schema contract and compatibility gate — added process coupling across otherwise-independent service teams.
-  - Unresolved: exact registry/serialization format and version-field convention are not specified by the BRD (requirement-spec Open Question #2) — escalated to the Event Design/Architecture Agent stage, not decided here.
+  - Chosen: Confluent-compatible schema registry (Avro payloads), enforced `BACKWARD` compatibility mode as the primary gate, plus a consumer-side tolerant reader as defense in depth.
+  - Why: Requirement-spec calls this a *forced* discipline, not an optional nicety — only a registry stops a bad change before it ships, versus catching it only after Analytics already broke. The concrete format (Avro + registry-assigned schema ID as the version pointer, `MAJOR.MINOR` subject metadata for human-readable additive-vs-breaking distinction) is now decided in requirement-spec.md §6 (D2), closing the residual gap this edge case previously escalated.
+  - Trade-off accepted: Every publisher now owns a schema contract and compatibility gate — added process coupling across otherwise-independent service teams. A `MAJOR` bump additionally requires a dual-publish transition window per event type, mirroring the platform's existing RabbitMQ→Kafka dual-publish precedent (BRD §15).
 
 ## Edge Case: Event Volume / Backpressure at Full Platform Fan-In
 

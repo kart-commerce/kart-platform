@@ -37,7 +37,7 @@ Three aggregate roots in one bounded context, per [ADR-0001](../../adr/0001-offe
 - A quote expires after a TTL (see Modeling Decision #2) — an expired quote must be re-issued, not reused, at checkout.
 
 **Domain events:**
-- `PriceQuoteIssued` (published — existing, BRD §5.4; consumer still unconfirmed per requirement-spec Q5)
+- `PriceQuoteIssued` (published — existing, BRD §5.4; consumer confirmed as Analytics-only, requirement-spec Q5 resolved via ADR-0008/ADR-0004)
 
 ## Aggregate: PromotionCampaign
 
@@ -50,8 +50,8 @@ Three aggregate roots in one bounded context, per [ADR-0001](../../adr/0001-offe
 - Precedence when multiple campaigns apply to the same SKU is defined (see Modeling Decision #3) — the aggregate must resolve this deterministically, not leave it to caller order.
 
 **Domain events:**
-- `PromotionActivated` (published — existing, BRD §5.4; consumer still unconfirmed per requirement-spec Q5)
-- `PromotionDeactivated` (published — **new**, symmetric counterpart; needed so external consumers like Notification aren't left inferring campaign end from silence)
+- `PromotionActivated` (published — existing, BRD §5.4; consumer confirmed as Analytics-only, requirement-spec Q5 resolved via ADR-0008/ADR-0004)
+- `PromotionDeactivated` (published — **new**, symmetric counterpart; not in the BRD, added so Analytics' fan-in ingestion (ADR-0004) has a matching "campaign ended" signal instead of only ever seeing activations. Same Analytics-only consumer resolution as `PromotionActivated`.)
 
 ## Cross-Aggregate Interaction
 
