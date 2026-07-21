@@ -123,14 +123,14 @@ See [full architecture doc](../services/kart-analytics-service/architecture.md).
 |---|---|---|---|
 | Inbound | Order | `OrderCreated`, `OrderConfirmed`, `OrderCancelled`, `OrderCompensationTriggered`, `OrderDelivered` | Async |
 | Inbound | Inventory | `InventoryReserved`, `InventoryReservationFailed`, `InventoryReleased`, `InventoryReplenished` | Async |
-| Inbound | Payment | `PaymentCompleted`, `PaymentFailed`, `RefundIssued` | Async |
-| Inbound | Shipping | `ShipmentDispatched` | Async |
+| Inbound | Payment | `PaymentCompleted`, `PaymentFailed`, `RefundIssued`, `ChargebackReceived` | Async |
+| Inbound | Shipping | `ShipmentDispatched`, `ShipmentCreationFailed` | Async |
 | Inbound | Delivery Tracking | `DeliveryStatusUpdated` | Async |
-| Inbound | Product | `ProductCreated`, `ProductPriceChanged` | Async |
-| Inbound | Review | `ReviewSubmitted` | Async |
+| Inbound | Product | `ProductCreated`, `ProductPriceChanged`, `ProductUpdated` | Async |
+| Inbound | Review | `ReviewSubmitted`, `ReviewUpdated` | Async |
 | Inbound | Category | `CategoryUpdated` | Async |
-| Inbound | Offer | `CouponRedeemed`, `PriceQuoteIssued`, `PromotionActivated` | Async |
-| Inbound | User | `UserProfileUpdated` | Async |
+| Inbound | Offer | `CouponRedeemed`, `PriceQuoteIssued`, `PromotionActivated`, `PromotionDeactivated` | Async |
+| Inbound | User | `UserProfileUpdated`, `UserDataErased` | Async |
 | Inbound | Identity | `UserRegistered`, `SessionCreated`, `UserAccountUpdated` | Async |
 | Inbound | Notification | `NotificationSent` | Async |
 | Inbound | Cart | `CartCheckedOut` | Async |
@@ -139,7 +139,7 @@ See [full architecture doc](../services/kart-analytics-service/architecture.md).
 | Outbound | (none) | Analytics publishes no event | — |
 | Inbound (internal only) | Internal BI/ops consumers | Internal REST query API (`/internal/v1/...`) + BI-tool warehouse connection | Sync, internal-only, not via public Gateway |
 
-Full fan-in of every published platform event per [ADR-0004](../adr/0004-analytics-full-fanin-ingestion.md). Zero synchronous coupling in either direction — no public inbound endpoint, no synchronous outbound dependency on any other service. Not a participant in the Order Saga (BRD §12).
+Full fan-in of every published platform event per [ADR-0004](../adr/0004-analytics-full-fanin-ingestion.md). `ChargebackReceived` ([ADR-0012](../adr/0012-payment-chargeback-handling.md)), `ShipmentCreationFailed` ([ADR-0015](../adr/0015-shipping-shipment-creation-failed-event.md)), `ProductUpdated`, `ReviewUpdated`, `PromotionDeactivated`, and `UserDataErased` ([ADR-0016](../adr/0016-user-gdpr-erasure-policy.md)) were added to this row during this service's own Architecture Agent pass, cross-checked against each publishing service's own `architecture.md` — see `kart-analytics-service/architecture.md`'s "Full Fan-In Completeness Check" for detail. Zero synchronous coupling in either direction — no public inbound endpoint, no synchronous outbound dependency on any other service. Not a participant in the Order Saga (BRD §12).
 
 ## kart-notification-service
 
@@ -231,3 +231,23 @@ See [full architecture doc](../services/kart-category-service/architecture.md).
 | Outbound | Analytics | `CategoryUpdated` (ADR-0004, ADR-0008) | Async |
 
 No synchronous outbound dependency on any other service — the one inbound sync edge (Admin's catalog-management calls) is a low-frequency control-plane dependency, not a chatty chain. Not a participant in the Order Saga (BRD §12); served directly from PostgreSQL, no separate Mongo read model (ADR-0011). No wired edge to Product/Search today — both hold denormalized category copies but neither is a confirmed `CategoryUpdated` consumer yet (ADR-0008's own stated scope boundary; each service's own future call).
+
+## kart-identity-service
+
+See [full architecture doc](../services/kart-identity-service/architecture.md).
+
+| Direction | Peer | Mechanism | Type |
+|---|---|---|---|
+| Inbound (client, via API Gateway) | Customer / Support Agent / Admin / Partner API clients | `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/mfa/verify`, `/auth/password/reset-initiate`, `/auth/password/reset-confirm` | Sync |
+| Inbound (browser redirect) | Enterprise IdP (Okta / Azure AD / Google Workspace) | SAML ACS / OIDC callback | Sync (inline, cannot be deferred) |
+| Inbound (browser redirect) | Social IdP (Google / Apple) | OIDC callback | Sync (inline) — resolves to `Customer` role only, never elevated |
+| Inbound (service-to-service) | Admin Service | `POST /internal/users/{userId}/lock`, `.../unlock` | Sync (internal, client-credentials, `Admin`-scoped only) |
+| Inbound (edge, cached, low-frequency) | API Gateway | JWKS public-key retrieval (RS256 local signature verification) | Sync, but not a per-request coupling |
+| Shared-state (not a service call) | API Gateway | Redis-backed revocation list (`identity:revocation:*`) | Shared infra — Identity writes on logout/role-change/lock, Gateway reads on every authenticated request |
+| Outbound (published) | User, Notification, Analytics | `UserRegistered` | Async (3x retry, `identity.dlq`, ADR-0007) |
+| Outbound (published) | Analytics | `SessionCreated` | Async (2x retry, `identity.dlq`, ADR-0007) |
+| Outbound (published) | User | `UserAccountUpdated` | Async (2x retry, `identity.dlq`, ADR-0006) |
+| Outbound (external) | Enterprise IdP | SAML AuthnRequest / OIDC authorization request | Sync, per-IdP bulkhead |
+| Outbound (external) | Social IdP | OIDC authorization request | Sync, own bulkhead group |
+
+No synchronous outbound dependency on any other **internal** Kart service — Identity's only synchronous outbound calls are to external IdPs it does not control (the explicit reason it holds "sole point of contact" status, BRD §24.2); its only synchronous inbound internal-service edge is Admin Service's lock/unlock call (ADR-0010), which matches the outbound edge already recorded from Admin's own side. Platform's highest availability tier (99.99%) — every service's RBAC resolution runs through Identity at token-mint time (BRD §24.1) and every authenticated request is gated by a JWT it minted, though this is a design-time/mint-time coupling resolved locally at the Gateway edge via a cached public key, not a live per-request call (see `architecture.md`'s Distributed-Monolith Risk section). Not a participant in the Order Saga (BRD §12). Consumes no events by design — the admin-lock/unlock trigger is a synchronous inbound API call, not an event.

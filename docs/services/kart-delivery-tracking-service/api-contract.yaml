@@ -1,0 +1,300 @@
+# doc_type: api-contract
+# service: kart-delivery-tracking-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-delivery-tracking-service/requirement-spec.md (approved; §5 API Surface,
+#     §6 items 1/2/3/4/6 all resolved, item 5 non-blocking/carried to Architecture Agent)
+#   - docs/services/kart-delivery-tracking-service/edge-cases.md (approved; "Tracking Query Before
+#     the First Status Event Has Arrived", "Unmapped Carrier Status", "Duplicate Carrier Webhook
+#     Delivery", "Out-of-Order Carrier Status Updates")
+#   - docs/services/kart-delivery-tracking-service/ddd-model.md (aggregate/value-object shapes:
+#     TrackingRecord, CanonicalDeliveryStatus, Eta, LifecycleOrdinal, WebhookDedupEntry)
+#   - docs/services/kart-delivery-tracking-service/design-decisions.md (durable-ingestion-buffering
+#     ack pattern; no read-side cache — see per-path notes below)
+#   - docs/services/kart-delivery-tracking-service/architecture.md (Dependencies table: GET is
+#     inbound-via-gateway/sync; carrier webhook is inbound-external/async; P95<150ms/P99<400ms read
+#     budget, P95<2s/P99<5s webhook-to-persisted-read budget)
+#   - docs/adr/0005-unify-order-terminal-event.md (constrains the wire string this service must
+#     eventually publish for its terminal successful status — an event-payload concern, not this
+#     REST contract's, but the same enum is reused here for GET's response body; see CanonicalDeliveryStatus)
+#
+# Input-freshness note (same situation already flagged and proceeded past at this stage for
+# kart-analytics-service — see that service's api-contract.yaml header for precedent): ddd-model.md,
+# design-decisions.md, and architecture.md are all still `status: pending-approval` (unchecked human
+# sign-off), but requirement-spec.md and edge-cases.md — the two docs this run was asked to
+# freshly verify — are both `status: approved` with every blocking item resolved, and the three
+# pending-approval docs contain no open questions and are internally consistent with them. This
+# contract is derived directly from that already-decided content (the 200-vs-202 semantic, the
+# CanonicalDeliveryStatus enum, the webhook ingestion contract, the ack/error-code pattern) rather
+# than re-deciding anything upstream. Re-confirm once a human checks those sign-off boxes; no
+# substantive rework of this contract is expected from that alone.
+#
+# Scope note: this document covers only this service's synchronous REST surface. `ShipmentDispatched`
+# (consumed, aggregate-creation trigger) and `DeliveryStatusUpdated` (published) are RabbitMQ bus
+# events, not REST — they belong in this service's future event-contract.md (Event Design Agent's
+# output; not yet produced for this service, per this repo's per-service file listing), not here.
+#
+# Idempotency-Key note (api-standards.md): neither endpoint below mutates money-adjacent state, so
+# the mandatory-`Idempotency-Key`-header rule does not apply to either. The webhook endpoint does
+# mutate state (ingests a carrier status), but its own domain-level dedup (WebhookDedupEntry —
+# carrier-supplied key or computed content hash, edge-cases.md "Duplicate Carrier Webhook Delivery")
+# already serves the idempotency purpose a client-supplied header would, and a carrier cannot be
+# required to send a platform-specific header it has no knowledge of.
+#
+# History-exposure note: requirement-spec.md explicitly leaves "pagination if history is exposed"
+# open as this stage's call. Decision: not exposed here. ddd-model.md's `TrackingStatusHistory`
+# aggregate exists purely as an internal audit/ops-triage record (unmapped-status review, duplicate/
+# regression audit) — nothing in requirement-spec.md's BRD-derived scope or edge-cases.md asks for
+# a customer- or partner-facing history read, so adding one would be inventing scope. Revisit if a
+# future requirement explicitly asks for it.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-delivery-tracking-service API
+  version: 1.0.0
+  description: >
+    Real-time delivery tracking read (public, via API Gateway) plus this service's own
+    carrier-webhook ingestion surface (internal-only), per requirement-spec.md §5. This
+    service has no PostgreSQL write side and no client-initiated write command in the usual
+    CQRS sense (architecture.md, Boundary Rationale) — `GET /v1/tracking/{trackingId}` is a
+    pure read over a MongoDB-materialized projection, and the webhook endpoint is a durable
+    ingestion-buffer front door, not a synchronous domain write.
+
+servers:
+  - url: https://api.kart.example/delivery-tracking
+    description: >
+      Public API Gateway. Serves `GET /v1/tracking/{trackingId}` only — reachable by
+      Client/Mobile/Web (architecture.md Dependencies table, "Inbound (client, via API Gateway)").
+  - url: https://internal.kart.local/delivery-tracking
+    description: >
+      Internal network segment only. Serves `POST /internal/v1/webhooks/carriers/{carrierId}` —
+      reachable by per-carrier webhook senders, which are external third parties, not Kart peers
+      (architecture.md: "Inbound (external — not a Kart service)").
+
+paths:
+  /v1/tracking/{trackingId}:
+    get:
+      operationId: getTrackingStatus
+      summary: Get the current tracking status, ETA, and last-updated time for a shipment.
+      description: >
+        Read-path only, P95<150ms/P99<400ms (requirement-spec §3; design-decisions.md: no cache
+        layer, every read served directly from MongoDB by `trackingId`). Returns `200` once a
+        `TrackingRecord` exists for this id; returns `202`/`PENDING` — never `404` — whenever no
+        record has yet been materialized, whether because `ShipmentDispatched` hasn't been
+        consumed yet for a genuinely valid id (the pre-materialization race window) or because the
+        id never existed at all: this service cannot distinguish the two from its own data alone
+        (requirement-spec §5/§6 item 6; edge-cases.md "Tracking Query Before the First Status
+        Event Has Arrived"; ddd-model.md Modeling Decision 2 — "pending" is never a persisted
+        state, it is purely an absence-of-record condition this read path translates at request
+        time). This endpoint intentionally never returns `404` for this reason; a future, separate
+        validation rule for malformed id *format* (e.g. empty string) is not precluded, but nothing
+        upstream defines a `TrackingId` format constraint to fast-fail against today (`TrackingId`
+        is an opaque, carrier/Shipping-sourced identifier — ubiquitous-language.md).
+      parameters:
+        - name: trackingId
+          in: path
+          required: true
+          schema: { type: string }
+          description: Opaque tracking identifier, first sourced from `ShipmentDispatched`'s payload.
+      responses:
+        '200':
+          description: A `TrackingRecord` exists for this id; current status/ETA/last-updated time.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackingResponse'
+        '202':
+          description: >
+            No `TrackingRecord` has been materialized yet for this id (pre-materialization race,
+            or an id this service cannot confirm ever existed). Not an error — a distinguishable
+            pending state per BRD §7's platform-wide "surface, don't hide" eventual-consistency
+            precedent (edge-cases.md).
+          headers:
+            Retry-After:
+              description: >
+                Suggested seconds before retrying, given architecture.md's P95<2s/P99<5s
+                webhook-to-persisted-read budget for the common case (this header does not apply
+                to the rarer case of an id that never existed, which this service cannot detect).
+              schema: { type: integer, format: int32, example: 3 }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PendingTrackingResponse'
+
+  /internal/v1/webhooks/carriers/{carrierId}:
+    post:
+      operationId: ingestCarrierWebhook
+      summary: Per-carrier webhook receiver — accepts one carrier's native status-update payload.
+      description: >
+        **New API surface this service defines for itself** (requirement-spec §5/§6 item 1, was
+        Open Question #1, self-labeled blocking; not a BRD-stated endpoint — the BRD only names
+        the concept "carrier webhook → internal event", BRD §5.4). The request body is that
+        carrier's own native payload — shape, field names, and encoding are carrier-dependent and
+        deliberately **not** fixed by this contract (requirement-spec §5: "what the BRD genuinely
+        cannot define ... remains carrier-dependent and out of scope for this spec"). After
+        `X-Carrier-Signature` verification, the per-carrier adapter selected by `{carrierId}`
+        parses this native body and normalizes it into this service's own fixed internal ingestion
+        contract — `{ carrierId, trackingId, carrierStatusCode, eventTimestamp, rawPayload }`,
+        where `rawPayload` is this same original request body, captured verbatim as an opaque
+        string for audit/debugging (requirement-spec §5) — before further dedup/ordinal-check/
+        mapping processing (design-decisions.md's ingestion-buffering decision; ddd-model.md's
+        internal `CarrierStatusIngested` event is this normalized shape's downstream, post-enqueue
+        representation). See `NormalizedCarrierIngestion` below for that internal contract's
+        documented shape — it is not this endpoint's literal request schema.
+      security: []
+      parameters:
+        - name: carrierId
+          in: path
+          required: true
+          schema: { type: string }
+          description: Identifies which per-carrier adapter/mapping/signature-secret applies.
+        - name: X-Carrier-Signature
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            HMAC-SHA256 signature of the raw request body, keyed by a per-carrier shared secret
+            (managed out of band, not part of this contract). Verified before any processing —
+            requests failing verification are rejected `401` with no history write and no dedup-
+            store entry (requirement-spec §5).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: >
+                Intentionally unconstrained here: this is the carrier's own native payload, whose
+                shape varies per integrated carrier and is out of this contract's scope to fix
+                (requirement-spec §5/§6 item 1).
+      responses:
+        '200':
+          description: >
+            Durably enqueued onto this service's internal processing pipeline after signature
+            verification (design-decisions.md's ingestion-buffering decision: ack only once the
+            broker confirms the publish). Does **not** mean the status was applied to the
+            `TrackingRecord` — dedup/ordinal-check/mapping happen asynchronously afterward; see
+            `GET /v1/tracking/{trackingId}` or `DeliveryStatusUpdated` (event-contract.md, not
+            this document) for that outcome.
+        '401':
+          description: >
+            `X-Carrier-Signature` missing or invalid. No `TrackingStatusHistory` entry is written
+            and no `WebhookDedupEntry` is created for a rejected request (requirement-spec §5).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: >
+            `{carrierId}` does not match a configured per-carrier adapter. Not stated explicitly
+            upstream; added here as a reasonable fast-fail default (api-standards.md, "API-layer
+            validation is a fast-fail convenience") — this service can only integrate a finite,
+            configured set of carriers (edge-cases.md "Unmapped Carrier Status" makes the same
+            "finite, maintained snapshot" point about status *codes* within a known carrier).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: >
+            Durable enqueue failed (e.g. broker unavailable) before an ack could be given. Returned
+            deliberately as `5xx` so the carrier's own webhook-retry policy re-sends the call —
+            this service has no broker-level redelivery of its own for a webhook it never durably
+            accepted (requirement-spec §6 item 4(a); no `tracking.dlq` involvement at this stage,
+            since the message was never durably enqueued in the first place).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+components:
+  schemas:
+    CanonicalDeliveryStatus:
+      type: string
+      enum: [Dispatched, InTransit, OutForDelivery, Delivered, Returned, FailedDelivery]
+      description: >
+        Single internal status vocabulary every exposed/published status must belong to
+        (ddd-model.md; edge-cases.md "Inconsistent Status Vocabulary Across Carriers"). Never a
+        raw carrier-native code, never `PENDING`/`Unknown` (those are API-layer-only or never-
+        exposed conditions, not members of this enum — see `PendingTrackingResponse` below). The
+        member list and ordering are an engineering default (ddd-model.md Modeling Decision 3), not
+        BRD-derived; `Delivered` is the one non-negotiable literal, since Order's consumption of
+        `DeliveryStatusUpdated` ([ADR-0005](../../adr/0005-unify-order-terminal-event.md)) filters
+        on it — flagged there for the Event Design Agent to confirm exact wire casing before that
+        event's schema is finalized. This REST contract reuses the same enum for `GET`'s response
+        body; it does not itself finalize the event payload's casing.
+
+    Eta:
+      type: object
+      required: [value, source]
+      properties:
+        value:
+          type: string
+          format: date-time
+          description: Estimated delivery time, recomputed on every accepted status update (ddd-model.md; edge-cases.md "ETA Going Stale Mid-Transit").
+        source:
+          type: string
+          enum: [CARRIER_SUPPLIED, SLA_FALLBACK]
+          description: >
+            `CARRIER_SUPPLIED` when the carrier's webhook/API provided an ETA directly;
+            `SLA_FALLBACK` when derived from the static per-carrier/per-service-level SLA table
+            (requirement-spec §2, resolved Open Question #2).
+
+    TrackingResponse:
+      type: object
+      required: [trackingId, status, eta, lastUpdatedAt]
+      properties:
+        trackingId: { type: string }
+        status: { $ref: '#/components/schemas/CanonicalDeliveryStatus' }
+        eta: { $ref: '#/components/schemas/Eta' }
+        lastUpdatedAt:
+          type: string
+          format: date-time
+          description: When `currentStatus`/`eta` was last (re)computed by an accepted update.
+
+    PendingTrackingResponse:
+      type: object
+      required: [trackingId, status, message]
+      properties:
+        trackingId: { type: string }
+        status:
+          type: string
+          enum: [PENDING]
+          description: >
+            Literal API-layer marker, not a member of `CanonicalDeliveryStatus` — `PENDING` is
+            never a persisted or published value (ddd-model.md Modeling Decision 2; requirement-
+            spec §2 "status is always the canonical internal enum ... never PENDING/UNKNOWN").
+        message:
+          type: string
+          example: "Tracking details for this shipment are not yet available. Please check back shortly."
+
+    NormalizedCarrierIngestion:
+      type: object
+      description: >
+        Documentation-only: the fixed internal shape every per-carrier adapter must normalize a
+        carrier's native webhook body into before dedup/ordinal-check/mapping (requirement-spec
+        §5; ddd-model.md's `CarrierStatusIngested` domain event). This is **not** the literal
+        request schema of `POST /internal/v1/webhooks/carriers/{carrierId}` — the actual HTTP
+        request body is the carrier's own native, unconstrained payload (see that path's
+        `requestBody`); this schema documents what this service's own adapter layer produces from
+        it, one field of which (`rawPayload`) is that same original body captured verbatim.
+      required: [carrierId, trackingId, carrierStatusCode, eventTimestamp, rawPayload]
+      properties:
+        carrierId: { type: string }
+        trackingId: { type: string }
+        carrierStatusCode:
+          type: string
+          description: Raw, carrier-native status value — mapped to `CanonicalDeliveryStatus` after ingestion, not before (requirement-spec §5).
+        eventTimestamp: { type: string, format: date-time, description: "Carrier-reported event time, ISO-8601 UTC." }
+        rawPayload:
+          type: string
+          description: Opaque passthrough of the original carrier webhook body, stored verbatim for audit/debugging (requirement-spec §5).
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "UNAUTHORIZED_SIGNATURE" }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
