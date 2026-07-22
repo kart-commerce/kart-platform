@@ -50,7 +50,7 @@ source: docs/services/kart-product-service/requirement-spec.md
 
 ## Edge Case: Concurrent read-model writes clobber the denormalized document
 
-- **What happens:** A `ProductPriceChanged` projection and a rating-recalc write (Product does consume `ReviewSubmitted` — requirement-spec Open Questions #2, resolved via ADR-0014 (`docs/adr/0014-review-rating-aggregate-ownership.md`)) can target the same `product_read_model` document concurrently; a naive full-document overwrite from one projector can clobber the other's fields.
+- **What happens:** A `ProductPriceChanged` projection and a rating-recalc write (Product consumes `ReviewSubmitted` and `ReviewUpdated` — requirement-spec Open Questions #2, resolved via ADR-0014 (`docs/adr/0014-review-rating-aggregate-ownership.md`)) can target the same `product_read_model` document concurrently; a naive full-document overwrite from one projector can clobber the other's fields.
 - **Why it happens:** BRD §6.2's denormalized document embeds price and `ratingSummary` together with no stated concurrency control, and the two fields are written by two independently-triggered projections.
 - **Solutions available (3):** Field-scoped partial updates per projector (`$set` only owned fields) · Optimistic concurrency via a document version field with retry-on-conflict · Split rating summary into its own document/collection, joined at read time.
 - **Decision (3-5 bullets max):**

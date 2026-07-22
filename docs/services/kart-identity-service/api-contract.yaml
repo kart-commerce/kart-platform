@@ -1,28 +1,20 @@
 # doc_type: api-contract
 # service: kart-identity-service
-# status: pending-approval
+# status: approved
 # generated_by: api-design-agent
 # source: docs/services/kart-identity-service/requirement-spec.md,
 #         docs/services/kart-identity-service/edge-cases.md,
-#         docs/services/kart-identity-service/design-decisions.md (proposed),
-#         docs/services/kart-identity-service/architecture.md (pending-approval)
+#         docs/services/kart-identity-service/design-decisions.md,
+#         docs/services/kart-identity-service/architecture.md,
+#         docs/services/kart-identity-service/ddd-model.md
 #
-# Process note (per this agent's own input contract): the normal input to
-# this stage is an *approved* ddd-model.md. That file does not exist yet for
-# kart-identity-service (docs/services/README.md's pipeline table still shows
-# "-" for Architecture/DDD Model/API-DB-Event Contracts for this service),
-# and design-decisions.md/architecture.md are themselves still
-# proposed/pending-approval, not approved. This draft was produced anyway,
-# at the orchestrating pipeline's explicit direction, from the two docs that
-# *are* approved (requirement-spec.md, edge-cases.md) plus the not-yet-approved
-# design-decisions.md/architecture.md as the best available grounding for
-# technology/boundary choices (RS256 signing, Redis-backed revocation list,
-# per-IdP resilience bulkheads, JIT provisioning, fail-closed role mapping).
-# Flagged explicitly rather than silently treated as equivalent to a real
-# ddd-model.md: a human must confirm this contract stays consistent once
-# ddd-model.md itself is produced and approved, and status here cannot move
-# past pending-approval until architecture.md/design-decisions.md are
-# themselves approved.
+# Process note update: this contract was originally drafted before
+# ddd-model.md existed for this service (design-decisions.md/architecture.md
+# were also still pending-approval/proposed at the time). All three have
+# since been produced/approved and this contract has been re-checked against
+# ddd-model.md's four aggregates (UserIdentity, Session, ServicePrincipal,
+# IdpGroupRoleMapping) — no endpoint below contradicts that model, so no
+# rework was needed. Status now approved.
 #
 # No breaking-change risk: first issue of this contract, nothing published
 # to a shared-contracts repo yet. Publishing a stable copy to kart-shared is
@@ -32,10 +24,10 @@
 # Money-adjacent Idempotency-Key rule (api-standards.md): not applicable —
 # no endpoint in this contract mutates money-adjacent state.
 #
-# Two endpoints below are additions beyond requirement-spec.md §5's starting
-# API Surface table, added because a stated FR is otherwise unusable without
-# them (the same reasoning the requirement-spec itself used to add
-# /auth/logout, /auth/mfa/verify, and the password-reset pair):
+# Three endpoints below are additions beyond requirement-spec.md §5's
+# starting API Surface table, added because a stated FR is otherwise
+# unusable without them (the same reasoning the requirement-spec itself
+# used to add /auth/logout, /auth/mfa/verify, and the password-reset pair):
 #   - POST /v1/auth/register: requirement-spec.md §2 states "Register a new
 #     user identity, publishing UserRegistered on success" as a Cross-service
 #     event-publishing FR, and BRD §24.2 states a native email/password
@@ -48,6 +40,16 @@
 #     needs a provisioning step (secret/QR issuance + first-code
 #     confirmation) distinct from /auth/mfa/verify (which only completes an
 #     already-configured challenge at login time). Added here.
+#   - PATCH /v1/auth/profile: requirement-spec.md §2/§4 (ADR-0006) require
+#     Identity to publish UserAccountUpdated "whenever Identity's copy of
+#     login email or display name changes — not just at registration time,"
+#     but tickets.md's original pass flagged that no endpoint anywhere
+#     actually triggers this — a genuine gap between a stated FR/invariant
+#     and the contracted surface. Added here: an authenticated endpoint
+#     updating displayName and/or email, applied immediately (no separate
+#     re-verification hop for email — the BRD states no such requirement and
+#     the endpoint already requires bearer authentication as that user),
+#     publishing UserAccountUpdated on commit.
 
 openapi: 3.0.3
 info:
@@ -358,6 +360,59 @@ paths:
           description: Logged out. Tokens added to the revocation list.
         '401':
           description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /auth/profile:
+    patch:
+      operationId: updateProfile
+      summary: Update the authenticated user's login email and/or display name.
+      description: >
+        Closes the gap between requirement-spec.md §2/§4 (ADR-0006)'s stated
+        invariant — Identity must publish UserAccountUpdated whenever its
+        copy of login email or display name changes, not just at
+        registration — and the API surface: no other endpoint writes to
+        these fields post-registration. Applied immediately (bearer auth as
+        the target user is the only gate; the BRD states no separate
+        email-reverification requirement). Publishes UserAccountUpdated
+        (payload: userId, email, displayName, updatedAt) on successful
+        commit (event-contract.md).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string }
+      responses:
+        '200':
+          description: Profile updated; UserAccountUpdated published.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: string, format: email }
+                  displayName: { type: string }
+                  updatedAt: { type: string, format: date-time }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Requested email already registered to another account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '400':
+          description: Validation error (malformed email, empty body).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }

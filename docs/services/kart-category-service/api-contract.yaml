@@ -1,0 +1,300 @@
+# doc_type: api-contract
+# service: kart-category-service
+# status: approved
+# generated_by: api-design-agent
+# source: docs/services/kart-category-service/requirement-spec.md,
+#         docs/services/kart-category-service/edge-cases.md,
+#         docs/services/kart-category-service/design-decisions.md,
+#         docs/services/kart-category-service/architecture.md,
+#         docs/services/kart-category-service/ddd-model.md
+#
+# No breaking-change risk: first issue of this contract, nothing published
+# to a shared-contracts repo yet. Publishing a stable copy to kart-shared is
+# deferred until that repo exists in this pipeline's scope.
+#
+# Money-adjacent Idempotency-Key rule (api-standards.md): not applicable —
+# no endpoint in this contract mutates money-adjacent state.
+#
+# Four write endpoints below are additions beyond requirement-spec.md §5's
+# starting API Surface table, per that spec's own §4/§5 resolution: Category
+# owns its own RBAC-gated write API rather than accepting writes to its
+# tables from Admin or any other caller directly. Exact routes/verbs were
+# this stage's own job, per requirement-spec.md §5/§6.
+
+openapi: 3.0.3
+info:
+  title: kart-category-service API
+  version: 1.0.0
+  description: >
+    Category taxonomy: hierarchy maintenance (create/rename/move/deprecate)
+    and read-only navigation (BRD §2.1 item 4). Max depth 4, materialized-path
+    storage (requirement-spec.md §2/§4). Served directly from PostgreSQL, no
+    MongoDB read model (ADR-0011).
+
+servers:
+  - url: /v1
+
+paths:
+  /categories:
+    get:
+      operationId: listCategories
+      summary: List categories for site navigation.
+      description: >
+        Read-only navigation surface (requirement-spec.md §5). Backed by the
+        write-through Redis cache in front of PostgreSQL (design-decisions.md,
+        "Caching Strategy for the /categories Read Path") — a cache miss
+        falls back to a PostgreSQL read replica, never a recursive query
+        (database-design.md's materialized-path indexes).
+      parameters:
+        - name: parentId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: >
+            List only the direct active children of this category. Omit to
+            list depth-1 (top-level department) categories.
+        - name: includeDeprecated
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Admin/back-office tooling only — the public storefront view never sets this.
+      responses:
+        '200':
+          description: Category listing.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Category' }
+
+    post:
+      operationId: createCategory
+      summary: Create a new category (RBAC-gated, Admin only).
+      description: >
+        Requirement-spec.md §4's write-ownership invariant: Category owns
+        this write exclusively — Admin Service calls this endpoint, never
+        writes to Category's tables directly (ADR-0010). Enforces the max
+        depth-4 invariant synchronously (edge-cases.md, "Unbounded hierarchy
+        depth degrades navigation read latency") and publishes
+        CategoryUpdated (operation=created) on success.
+      security:
+        - clientCredentials: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parentId:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: Omit or null to create a depth-1 (top-level department) category.
+      responses:
+        '201':
+          description: Category created; CategoryUpdated published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400':
+          description: >
+            Validation error, or the requested parentId is already at
+            depth 4 (would exceed the max-depth-4 invariant).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: parentId not found or not active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /categories/{categoryId}:
+    patch:
+      operationId: renameCategory
+      summary: Rename a category (RBAC-gated, Admin only).
+      description: >
+        Publishes CategoryUpdated (operation=renamed). Does not change
+        parentId/AncestorPath — use POST /categories/{categoryId}/move for
+        re-parenting (edge-cases.md keeps rename and move as distinct
+        operations since only move touches the cycle/depth invariants).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '200':
+          description: Category renamed; CategoryUpdated published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId not found or already deprecated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    delete:
+      operationId: deprecateCategory
+      summary: Soft-delete (deprecate) a category (RBAC-gated, Admin only).
+      description: >
+        Sets status=deprecated; categoryId is never physically removed or
+        reused (requirement-spec.md §4 — it is the shard key Product/Search
+        use downstream; edge-cases.md, "Deleting a category that still has
+        products assigned"). Publishes CategoryUpdated (operation=deprecated).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Category deprecated; CategoryUpdated published.
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId not found or already deprecated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /categories/{categoryId}/move:
+    post:
+      operationId: moveCategory
+      summary: Re-parent a category (and its subtree) (RBAC-gated, Admin only).
+      description: >
+        Runs the synchronous ancestor-chain cycle check and max-depth-4
+        check inside a SELECT ... FOR UPDATE transaction spanning the
+        target category and its ancestor chain (edge-cases.md, "Circular
+        category reference on re-parent"; design-decisions.md,
+        "Concurrency Control for Hierarchy Mutations"). Updates every
+        descendant's AncestorPath/Depth as one operation and publishes
+        exactly one coarse CategoryUpdated (operation=moved) describing
+        the moved subtree's root and new path — never one event per
+        descendant (edge-cases.md, "Subtree re-parenting invalidates
+        downstream category data").
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newParentId]
+              properties:
+                newParentId:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: Null to move this category (and its subtree) to depth-1 (top-level).
+      responses:
+        '200':
+          description: Category (and subtree) moved; one coarse CategoryUpdated published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400':
+          description: >
+            Move would create a cycle (newParentId is a descendant of
+            categoryId), or would exceed the max-depth-4 invariant for
+            categoryId or any of its descendants.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's Admin-scoped service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId or newParentId not found or not active.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            admin: "Admin-scoped service principal (Admin Service calling Category's write API, per ADR-0010) — Identity-issued (kart-identity-service), never validated locally"
+
+  schemas:
+    Category:
+      type: object
+      required: [categoryId, name, depth, status]
+      properties:
+        categoryId:
+          type: string
+          format: uuid
+          description: Stable, never reassigned or reused (requirement-spec.md §4) — the shard key Product/Search use downstream (BRD §6.2).
+        name:
+          type: string
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        ancestorPath:
+          type: array
+          items: { type: string, format: uuid }
+          description: Root-to-immediate-parent chain; empty for a depth-1 (top-level) category.
+        depth:
+          type: integer
+          minimum: 1
+          maximum: 4
+        status:
+          type: string
+          enum: [active, deprecated]
+
+    Problem:
+      type: object
+      description: RFC 7807-style problem details.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: max_depth_exceeded
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

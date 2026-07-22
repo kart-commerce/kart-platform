@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0015: New `ShipmentCreationFailed` Event for Un-Shippable Orders, Consumed by Order as a Post-Confirmation Hold (Not a Saga Compensation)
 
 ## Status
 
-Proposed (final ADR number assigned in a later pipeline pass)
+Accepted
 
 ## Context
 

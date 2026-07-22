@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0013: Recommendation Consumes `ProductCreated` — §5.4/§10 Inconsistency Resolved in Favor of the Event Catalog
 
 ## Status
 
-Proposed (final ADR number assigned in a later pass)
+Accepted
 
 ## Context
 

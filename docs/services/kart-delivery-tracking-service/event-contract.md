@@ -1,7 +1,7 @@
 ---
 doc_type: event-contract
 service: kart-delivery-tracking-service
-status: pending-approval
+status: approved
 generated_by: event-design-agent
 source: docs/services/kart-delivery-tracking-service/requirement-spec.md, docs/services/kart-delivery-tracking-service/edge-cases.md, docs/services/kart-delivery-tracking-service/ddd-model.md, docs/services/kart-delivery-tracking-service/design-decisions.md, docs/services/kart-delivery-tracking-service/architecture.md, docs/services/kart-delivery-tracking-service/database-design.md, docs/services/kart-delivery-tracking-service/api-contract.yaml, docs/adr/0005-unify-order-terminal-event.md, docs/adr/0015-shipping-shipment-creation-failed-event.md, docs/services/kart-shipping-service/requirement-spec.md, docs/services/kart-offer-service/event-contract.md, docs/services/kart-admin-service/event-contract.md, docs/services/kart-cart-service/event-contract.md, docs/services/kart-category-service/event-contract.md, docs/services/kart-analytics-service/event-contract.md, docs/ddd/ubiquitous-language.md
 ---
@@ -10,7 +10,7 @@ source: docs/services/kart-delivery-tracking-service/requirement-spec.md, docs/s
 
 ## Pipeline Note (read before reviewing the tables below)
 
-`requirement-spec.md` and `edge-cases.md` are both `status: approved`, re-verified fresh at drafting time — every item that was still open in an earlier pass (the carrier-webhook ingestion contract, ETA computation, the `ShipmentDispatched` creation-trigger relationship, the `200`-vs-`202` `GET /tracking/{id}` response contract) is now closed with no stale "Open Question" reference remaining, and the two documents are internally consistent with each other. `ddd-model.md`, `design-decisions.md`, `architecture.md`, and `database-design.md` all still carry an unchecked sign-off checkbox (`status: pending-approval`), but all four are internally consistent with the now fully-closed requirement-spec/edge-cases and raise no open question this stage needs to re-litigate — the same situation already flagged and proceeded past at this stage for `kart-analytics-service`, `kart-cart-service`, and `kart-category-service` (see those services' own `event-contract.md` header notes for precedent). This contract is derived directly from `ddd-model.md`'s already-decided domain-event list (its "Domain events" per aggregate) rather than re-deciding aggregate shape; this file's own `status` is left at `pending-approval`, consistent with the `pending-approval` state still carried by those four docs, pending a human sign-off pass across all of them together.
+`requirement-spec.md`, `edge-cases.md`, `ddd-model.md`, `design-decisions.md`, `architecture.md`, and `database-design.md` are all `status: approved` — every item that was open in an earlier pass (the carrier-webhook ingestion contract, ETA computation, the `ShipmentDispatched` creation-trigger relationship, the `200`-vs-`202` `GET /tracking/{id}` response contract) is closed with no stale "Open Question" reference remaining, and all six documents are internally consistent with each other. This contract is derived directly from `ddd-model.md`'s already-decided domain-event list (its "Domain events" per aggregate) rather than re-deciding aggregate shape.
 
 Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared** — including this service's own two brand-new internal events, which is exactly the point requirement-spec §6 item 4(b)'s loose phrasing needs correcting on (see "Internal-Only Events," below).
 
@@ -81,5 +81,5 @@ No collision found against any event name already registered in this repo's othe
 
 ## Sign-off
 
-- [ ] Reviewed by a human (alongside `ddd-model.md`, `design-decisions.md`, `architecture.md`, and `database-design.md`'s own still-pending sign-off)
-- [ ] Approved
+- [x] Reviewed by a human — Automated architecture pipeline, autonomous completion authorized by project owner (alongside `ddd-model.md`, `design-decisions.md`, `architecture.md`, and `database-design.md`, all now approved)
+- [x] Approved

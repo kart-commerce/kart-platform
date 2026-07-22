@@ -1,0 +1,370 @@
+# doc_type: api-contract
+# service: kart-product-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-product-service/ddd-model.md (Product/Variant aggregate split; SKU-keyed
+#     read model; Product/Variant/ProductStatus/VariantStatus/ProductAttributes/Sku value objects)
+#   - docs/services/kart-product-service/requirement-spec.md (§5 API Surface starting point; §2/§4
+#     write-API resolution — Admin/Partner API are callers, never a second writer to this service's
+#     own tables)
+#   - docs/services/kart-product-service/edge-cases.md (SKU uniqueness enforcement; out-of-order
+#     ProductPriceChanged; write-through price caching)
+#   - docs/services/kart-product-service/design-decisions.md (hybrid synchronous-write/async-fan-out
+#     communication style; PostgreSQL unique-constraint SKU enforcement)
+#   - docs/services/kart-product-service/architecture.md (P95<150ms/P99<400ms read budget; Admin/
+#     Partner API/Recommendation/Cart caller edges; ADR-0010)
+#   - docs/adr/0010-admin-service-scope-and-integration.md (Admin invokes this API as a caller,
+#     never writes this service's own tables directly)
+#   - docs/services/kart-category-service/api-contract.yaml (clientCredentials security-scheme
+#     convention, reused verbatim for consistency)
+#
+# Resource-naming note: ddd-model.md resolves two distinct aggregates — Product (the parent/
+# grouping record) and Variant (the priced, sellable, SKU-identified unit) — and resolves the
+# public read model to be keyed by SKU alone, matching the BRD's own §6.2 worked example and every
+# downstream consumer's SKU-level access pattern. This contract keeps that same two-resource split
+# on the write side (`/v1/product-groups/{productGroupId}` for the Product aggregate,
+# `/v1/products/{sku}` for the Variant aggregate) rather than overloading one path with two
+# different identifier shapes.
+#
+# Idempotency-Key note (api-standards.md): none of these endpoints mutate money-adjacent state, so
+# the mandatory-Idempotency-Key-header rule does not apply. SKU global uniqueness (edge-cases.md)
+# is itself the write-side idempotency backstop for a retried `POST /v1/product-groups` or
+# `POST .../variants` call — a retry with the same caller-supplied `sku` is rejected `409`, not
+# silently duplicated.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-product-service API
+  version: 1.0.0
+  description: >
+    Catalog system-of-record: product/variant creation and edit (Admin/Partner-API-called write
+    surface) plus the public SKU-keyed catalog read (`GET /v1/products/{sku}`), per
+    requirement-spec.md §5. PostgreSQL is the strongly-consistent write side; MongoDB
+    (`product_read_model`) is the eventually-consistent, denormalized read side (architecture.md).
+
+servers:
+  - url: https://api.kart.example/products
+    description: >
+      Public API Gateway. Serves `GET /v1/products/{sku}` to Client/Mobile/Web, and is also the
+      path Recommendation's and Cart's request-time validation calls reach (architecture.md
+      Dependencies table) — both fail open on timeout/error on their own side.
+  - url: https://internal.kart.local/products
+    description: >
+      Internal network segment. Serves every write endpoint below — reachable by Admin Service's
+      and the Partner API's client-credentials service principals only (ADR-0010; BRD §24.1).
+
+paths:
+  /v1/product-groups:
+    post:
+      operationId: createProductGroup
+      summary: Create a Product (parent) and its initial Variant (SKU) together.
+      description: >
+        ddd-model.md's Cross-Aggregate Interaction flow 1: saves `Product` (status `Draft`), then
+        its initial `Variant`, then flips `Product.status` to `Published`, then publishes
+        `ProductCreated` for that SKU — two sequenced saves, never one ACID transaction. Callers:
+        Admin's `/admin/*` catalog-management surface and the Partner API's bulk-upload feed
+        (BRD §24.1, ADR-0010) — both call this API, neither writes this service's tables directly.
+      security:
+        - clientCredentials: [admin, partner]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, categoryId, sku, price]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                categoryId:
+                  type: string
+                  description: >
+                    Caller-supplied reference to a Category id (kart-category-service). Not
+                    independently validated or refreshed against Category (architecture.md,
+                    "Category — no confirmed dependency edge today").
+                brand: { type: string }
+                sku:
+                  type: string
+                  description: Caller-supplied (Admin's catalog UI or the Partner bulk feed already assigns SKUs). Must be globally unique.
+                price: { $ref: '#/components/schemas/Money' }
+                attributes: { $ref: '#/components/schemas/ProductAttributes' }
+      responses:
+        '201':
+          description: Product group and its initial Variant created; `ProductCreated` published for the initial SKU.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [productGroupId, sku]
+                properties:
+                  productGroupId: { type: string, format: uuid }
+                  sku: { type: string }
+        '409':
+          description: >
+            `sku` already exists (PostgreSQL unique constraint — edge-cases.md "SKU uniqueness
+            enforcement"). No `Product`/`Variant` row written, no event published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's or the Partner API's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/product-groups/{productGroupId}:
+    patch:
+      operationId: updateProductGroup
+      summary: Edit shared parent fields, or archive the entire product group.
+      description: >
+        ddd-model.md's Cross-Aggregate Interaction flow 3. A field edit (`name`/`description`/
+        `categoryId`/`brand`) fans out one `ProductUpdated` per currently-`Active` sibling
+        `Variant` under this group. Setting `status: Archived` cascades every `Active` sibling to
+        `Discontinued`, each publishing its own `ProductDiscontinued` — a sequenced, per-SKU
+        operation, never a bulk/atomic multi-document write (ddd-model.md Modeling Decision 5).
+      security:
+        - clientCredentials: [admin, partner]
+      parameters:
+        - name: productGroupId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                categoryId: { type: string }
+                brand: { type: string }
+                status:
+                  type: string
+                  enum: [Archived]
+                  description: Only a forward transition to Archived is accepted here (ddd-model.md — Variant discontinuation is one-directional; there is no un-archive path).
+      responses:
+        '200':
+          description: >
+            Parent fields updated and/or archive cascade applied; per-SKU `ProductUpdated`/
+            `ProductDiscontinued` events published as described above.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  productGroupId: { type: string, format: uuid }
+                  affectedSkus:
+                    type: array
+                    items: { type: string }
+        '404':
+          description: No such `productGroupId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's or the Partner API's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/product-groups/{productGroupId}/variants:
+    post:
+      operationId: addVariant
+      summary: Add a new sellable Variant (SKU) to an existing Product group.
+      description: >
+        ddd-model.md's Cross-Aggregate Interaction flow 2 — no write to the parent `Product` row
+        is needed (it already exists and is already `Published`); saves the new `Variant` and
+        publishes `ProductCreated` for it.
+      security:
+        - clientCredentials: [admin, partner]
+      parameters:
+        - name: productGroupId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sku, price]
+              properties:
+                sku: { type: string }
+                price: { $ref: '#/components/schemas/Money' }
+                attributes: { $ref: '#/components/schemas/ProductAttributes' }
+      responses:
+        '201':
+          description: Variant created under the existing product group; `ProductCreated` published.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sku: { type: string }
+        '404':
+          description: No such `productGroupId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: '`sku` already exists (edge-cases.md "SKU uniqueness enforcement").'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/products/{sku}:
+    get:
+      operationId: getProduct
+      summary: Get the current catalog detail for one sellable SKU.
+      description: >
+        Public read path. P95 < 150ms, P99 < 400ms (requirement-spec §3). Served directly from
+        `product_read_model`, keyed by `sku` (ddd-model.md's read-model-keying resolution) — no
+        cache layer in front of general fields (write-through applies to `price` only at the
+        write path, design-decisions.md's caching decision; this read always reflects the current
+        MongoDB document either way).
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The current projected state for this SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '404':
+          description: No `Variant` exists for this SKU (never materialized, or the id is simply invalid — this service has no separate "pending" state the way an event-fed-only service does, since `Variant` creation is a synchronous write, not an async materialization race).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    patch:
+      operationId: updateVariant
+      summary: Update one Variant's price, status, or attributes.
+      description: >
+        A `price` field present in the body publishes `ProductPriceChanged` (with the added
+        `occurredAt` ordering field — event-contract.md's payload resolution). `status: Discontinued`
+        publishes `ProductDiscontinued`. Any other field (`attributes`) publishes `ProductUpdated`.
+        Exactly one of these three outcomes fires per call — a request may not mix a price change
+        with a status change in the same call (kept simple and unambiguous for the event fan-out
+        rule below; a caller needing both issues two calls).
+      security:
+        - clientCredentials: [admin, partner]
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                price: { $ref: '#/components/schemas/Money' }
+                status:
+                  type: string
+                  enum: [Discontinued]
+                  description: One-directional only — no un-discontinue path (ddd-model.md).
+                attributes: { $ref: '#/components/schemas/ProductAttributes' }
+      responses:
+        '200':
+          description: Variant updated; the corresponding event published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '404':
+          description: No such SKU.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Request mixes a `price` change with a `status` change in one call.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's or the Partner API's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            admin: "Admin-scoped service principal (Admin Service calling Product's write API, per ADR-0010) — Identity-issued, never validated locally"
+            partner: "Partner API's bulk-catalog-upload service principal (BRD §24.1) — same write endpoints as Admin, not a separate write surface"
+
+  schemas:
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number, format: double }
+        currency: { type: string, example: USD }
+
+    ProductAttributes:
+      type: object
+      description: >
+        ddd-model.md's hybrid EAV/JSONB value object — `size`/`color` are first-class indexed
+        fields (requirement-spec §2); everything else lives in `extendedAttributes`.
+      properties:
+        size: { type: string, nullable: true }
+        color: { type: string, nullable: true }
+        extendedAttributes:
+          type: object
+          additionalProperties: true
+          description: Schemaless bag for category-specific attributes not promoted to a first-class column.
+
+    RatingSummary:
+      type: object
+      properties:
+        avg: { type: number, format: double }
+        count: { type: integer }
+      description: >
+        Denormalized projection of Review Service's canonical rating aggregate (ADR-0014) —
+        never recomputed or reconciled synchronously against Review at read time.
+
+    ProductResponse:
+      type: object
+      required: [sku, name, category, price, status]
+      properties:
+        sku: { type: string }
+        name: { type: string, description: Denormalized from the parent Product group (ddd-model.md's read-model-keying resolution). }
+        description: { type: string }
+        category:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        brand: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        status:
+          type: string
+          enum: [Active, Discontinued]
+        attributes: { $ref: '#/components/schemas/ProductAttributes' }
+        ratingSummary: { $ref: '#/components/schemas/RatingSummary' }
+        lastUpdatedAt: { type: string, format: date-time }
+
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "SKU_ALREADY_EXISTS" }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }

@@ -111,6 +111,16 @@ source: docs/services/kart-identity-service/requirement-spec.md
   - Trade-off accepted: A still-employed Admin using a long-lived federated session is forced to re-authenticate against the IdP at least once every 24 hours even though nothing about their access changed — accepted because the alternative (no cap, or the native 90-day cap) has unbounded/much larger exposure once the IdP has already revoked the person, which conflicts directly with Domain Invariant #2 ("a revoked token must never be accepted again").
   - Note: This mitigates the worst failure mode but does not solve the underlying gap — real-time SLO/deprovisioning propagation is carried forward as a non-blocking, later-pipeline-stage item (requirement-spec.md §6, item 1) once specific IdP capabilities (SCIM, SLO endpoints) are known at the Architecture Agent stage.
 
+## Edge Case: `UserDataErased` Arrives While the User Holds Active Sessions
+
+- **What happens:** Identity consumes `UserDataErased` for a user who still holds one or more valid, unexpired access/refresh tokens; redacting the `users` row alone does nothing to stop the Gateway from continuing to accept those already-minted tokens until they naturally expire.
+- **Why it happens:** Requirement-spec §4's new erasure invariant states redaction and revocation together, but they are two mechanically separate actions on two separate stores (PostgreSQL tombstone write vs. Redis revocation-list population) — the same tension as "Stale Revocation Under Stateless JWT Validation" above, now triggered by erasure instead of logout.
+- **Solutions available (2):** Reuse the existing Redis-backed revocation-list mechanism — populate a revocation entry for every live session belonging to that `userId` in the same handler that performs the PII tombstone write · Rely solely on the bounded access-token TTL (~15 min) with no explicit revocation action, accepting a short post-erasure access window
+- **Decision:**
+  - Chosen: Reuse the existing revocation-list mechanism — the `UserDataErased` handler enumerates the user's live sessions (`idx_sessions_user_live`) and populates a revocation entry for each, the same write shape already used for logout/role-change/admin-lock.
+  - Why: No new infrastructure is needed; a compliance-triggered erasure deserves at least the same immediacy guarantee already given to an admin-triggered lock, not a weaker one.
+  - Trade-off accepted: None material beyond the already-accepted bounded window on the revocation-list check itself (see "Stale Revocation Under Stateless JWT Validation") — this reuses an already-accepted risk, not a new one.
+
 ## Edge Case: Out-of-Order Delivery of Successive `UserAccountUpdated` Events
 
 - **What happens:** A user changes their login email and/or display name twice in quick succession (e.g., corrects a typo moments after saving, or two devices submit changes close together); the resulting `UserAccountUpdated` events for the same `userId` can be delivered to User Service out of order or redelivered, letting a stale (earlier) value overwrite the newer one in User Service's denormalized copy.

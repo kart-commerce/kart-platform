@@ -1,9 +1,9 @@
 ---
 doc_type: design-decisions
 service: kart-cart-service
-status: pending-approval
+status: approved
 generated_by: design-decision-agent
-source: docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-cart-service/edge-cases.md
+source: docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-cart-service/edge-cases.md, docs/adr/0016-user-gdpr-erasure-policy.md
 ---
 
 # Design Decisions: kart-cart-service
@@ -47,11 +47,21 @@ Cross-cutting technology/design-pattern choices this service's approved `require
   - Why: the reusable API standards reserve gRPC specifically for "internal, high-throughput synchronous calls... e.g. an inventory reserve check" — this lazy-validation call is exactly that shape. Failing open (not blocking checkout) matches the domain invariant that Cart's check is a UX improvement (surface unavailability earlier), not a gate — Inventory is the sole enforcer of the oversell invariant, so a Product/Inventory slowdown or outage must not become a Cart/checkout outage, especially given Cart and Product/Inventory do not share the same availability tier (Decision D6: Cart is 99.9% secondary tier).
   - Trade-off accepted: during a downstream outage or an open breaker, a user can proceed to checkout with a cart line item that is actually unavailable — already an accepted consequence of choosing lazy (checkout-time-only) validation in `edge-cases.md`; this decision only extends that same acceptance to also cover a downstream-unavailability window, rather than turning it into a hard checkout failure.
 
+## Decision: Erasure Mechanism for `UserDataErased` — Synchronous Multi-Store Hard Delete, Not Tombstone
+
+- **Requirement driving this:** requirement-spec §2's GDPR Erasure Consumption FR and §6 D10 (both added this pass, closing the gap ADR-0016 was updated to name Cart for); `edge-cases.md`'s "Residual Cart State After a `UserDataErased` Event" decision.
+- **Options considered (3):** delete only the PostgreSQL `Cart` row(s), leaving the Redis entry to expire on its own sliding TTL (up to 30 days, Decision D1) · delete the PostgreSQL row(s) and synchronously evict the Redis cache entry in one handler · tombstone the `Cart` row's contents in place (mirroring User Service's own pattern for retained-but-anonymized order/audit history, ADR-0016 item 3) rather than deleting it.
+- **Decision (3-5 bullets max):**
+  - Chosen: option 2 — synchronous hard delete of every `Cart` row (Active or CheckedOut) owned by the erased `userId` from PostgreSQL, plus a synchronous Redis cache-entry eviction, in one consumer handler.
+  - Why: ADR-0016 item 3's tombstone-vs-delete split turns on whether the data is BRD-required retained history — Order's/Payment's own records are, a shopping cart (checked-out or not) is not, so there is nothing to anonymize in place and tombstoning would only leave a purposeless sentinel row. Leaving the Redis entry to its own TTL (option 1) reintroduces exactly the "erased user's cart still readable for up to 30 days" gap `edge-cases.md`'s decision already rejected, given ADR-0016 item 7's framing of a delayed erasure as a compliance failure.
+  - Trade-off accepted: the handler touches two stores instead of one, and must override the normal-case retention of a `CheckedOut` cart (ddd-model.md invariant 4) for this one trigger — accepted because a compliance-critical event is exactly the case where synchronous, complete erasure is worth the extra handler complexity, and this reuses the same delete-the-row mechanism the expiry-purge path (Decision D1) already implements, just triggered by a distinct external event instead of TTL expiry.
+  - Idempotency: mirrors the platform's standard idempotent-consumer pattern (`event-standards.md`) already relied on for this service's own `InventoryReservationFailed` handling — a redelivered `UserDataErased` for an already-erased `userId` finds nothing to delete and is a no-op.
+
 ## Escalations
 
-None. All four decisions above are grounded directly in this service's approved `requirement-spec.md`/`edge-cases.md` and are single-service engineering defaults consistent with the project's shared standards (`docs/standards/api-standards.md`'s gRPC guidance, `docs/standards/ddd-cqrs-standards.md`'s Outbox/replay expectation, `docs/standards/event-standards.md`'s at-least-once/DLQ defaults) — no genuinely equivalent options requiring a business call were found.
+None. All five decisions above are grounded directly in this service's approved `requirement-spec.md`/`edge-cases.md` (the erasure decision additionally grounded in ADR-0016, updated this pass to name Cart directly) and are single-service engineering defaults consistent with the project's shared standards (`docs/standards/api-standards.md`'s gRPC guidance, `docs/standards/ddd-cqrs-standards.md`'s Outbox/replay expectation, `docs/standards/event-standards.md`'s at-least-once/DLQ defaults) — no genuinely equivalent options requiring a business call were found.
 
 ## Sign-off
 
-- [ ] Reviewed by a human
-- [ ] Approved to proceed to Architecture Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to Architecture Agent

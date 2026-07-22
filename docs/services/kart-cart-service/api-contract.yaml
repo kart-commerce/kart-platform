@@ -1,0 +1,423 @@
+# doc_type: api-contract
+# service: kart-cart-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-cart-service/requirement-spec.md (approved; §5 API Surface, §6 Decisions
+#     D1-D9 all resolved — D8/D9 explicitly non-blocking handoffs to this stage, resolved below)
+#   - docs/services/kart-cart-service/edge-cases.md (approved; "Guest-to-user cart merge conflict",
+#     "Cart lost on Redis eviction or restart", "Stale cart references a deleted or out-of-stock
+#     product", "Checkout races InventoryReservationFailed", "Abandoned-cart expiry races a
+#     returning user")
+#   - docs/services/kart-cart-service/ddd-model.md (aggregate/value-object shapes: Cart,
+#     CartLineItem, CartOwner, CartVersion, LineItemAvailability, CartStatus; invariants 1-5)
+#   - docs/services/kart-cart-service/design-decisions.md (optimistic concurrency via version
+#     column; Transactional Outbox for CartCheckedOut; gRPC checkout-time validation is an
+#     internal Cart-outbound call, not part of this inbound contract)
+#   - docs/services/kart-cart-service/architecture.md (Dependencies table: client/gateway is the
+#     only inbound sync edge; no dependency edge to Order in either direction)
+#   - docs/services/kart-cart-service/event-contract.md (CartCheckedOut / InventoryReservationFailed
+#     — RabbitMQ bus events, out of scope for this REST document)
+#   - docs/ddd/ubiquitous-language.md ("Owned by kart-cart-service" section — term definitions
+#     reused verbatim below)
+#   - docs/adr/0007-event-catalog-completeness.md, docs/adr/0008-event-catalog-completeness-round-2.md
+#     (confirm CartCheckedOut is Analytics-only, never Order's creation trigger)
+#
+# Input-freshness note (resolved): an earlier pass produced this contract while ddd-model.md,
+# design-decisions.md, architecture.md, and event-contract.md were still status: pending-approval
+# (same situation already flagged and proceeded past at this stage for
+# kart-delivery-tracking-service — see that service's api-contract.yaml header for precedent). All
+# four are now status: approved, confirmed internally consistent with this contract and with each
+# other, and with a new GDPR erasure consumer responsibility added (ADR-0016, updated to name Cart;
+# see event-contract.md's UserDataErased row) — an async, event-driven addition with no REST surface
+# of its own, so no endpoint below changes as a result. No substantive rework of this contract was
+# needed from that confirmation pass.
+#
+# Path-naming note (api-standards.md "plural nouns" convention): `/v1/cart` is deliberately kept
+# singular, not pluralized to `/v1/carts`, because it is a per-caller-identity singleton resource
+# (there is exactly one live Cart per CartOwner at a time, per ddd-model.md invariant 1) — the same
+# recognized REST exception class as `/profile` or `/me` — and because the BRD's own API Surface
+# row (requirement-spec §5) already names the literal path `/cart`; deviating from that literal,
+# BRD-anchored text would be an unjustified invention, not a standards fix.
+#
+# Idempotency-Key note (api-standards.md, api-design-agent.md): none of the endpoints below carry a
+# mandatory `Idempotency-Key` header, because none of them mutate money-adjacent state — Cart holds
+# only `sku`+`quantity`+availability (ddd-model.md), never price or payment data (Offer/Payment own
+# that). Retry-safety is instead achieved per-endpoint by construction, documented inline:
+#   - `POST /v1/cart/merge` is naturally idempotent because a successfully merged guest cart is
+#     deleted (ddd-model.md Modeling Decision #1, "terminated ... not left as an ongoing peer") — a
+#     retried merge finds no guest cart to fold in and is a no-op returning the already-merged cart.
+#   - `POST /v1/cart/checkout` is naturally idempotent because `CartStatus = CheckedOut` is terminal
+#     (ddd-model.md invariant 4) — a retried checkout call on an already-checked-out cart is a no-op
+#     returning the same terminal state, never re-publishing `CartCheckedOut`.
+#   - `DELETE /v1/cart/items/{sku}` is idempotent by standard REST DELETE semantics (repeating it is
+#     a no-op once the line item is gone).
+#   - `POST /v1/cart/items` (additive quantity) and `PUT /v1/cart/items/{sku}` (set quantity) are not
+#     naturally idempotent on retry, but this is judged acceptable here — not money-adjacent, and the
+#     optional `If-Match` precondition (see Concurrency note below) already gives a client that wants
+#     stronger retry-safety a voluntary tool without inventing a new required header the requirement
+#     spec never asked for.
+#
+# Concurrency note (design-decisions.md "Concurrency Control for Cart Mutations and Merge"):
+# `CartVersion` is surfaced as a standard HTTP `ETag` on every response that returns a cart, and
+# every mutating endpoint accepts an optional `If-Match` precondition header. When `If-Match` is
+# supplied and does not match the cart's current version, the request is rejected `409 Conflict`
+# (design-decisions.md: "a version mismatch is rejected and surfaced to the caller as a conflict to
+# retry"). `If-Match` is deliberately optional, not mandatory, so that the very first mutation to a
+# brand-new cart (no prior version to have fetched) is not forced through an artificial GET-first
+# round trip; a client that wants the stronger guarantee can always supply the ETag it last read.
+#
+# Checkout-wiring note (resolves requirement-spec Decision D8, non-blocking handoff): Cart exposes
+# its own dedicated `POST /v1/cart/checkout`, distinct from Order's separate `POST /orders`. Calling
+# it transitions `CartStatus` `Active` -> `CheckedOut` and publishes `CartCheckedOut` via the
+# Transactional Outbox (design-decisions.md) in the same transaction as that state change. This is
+# chosen over "Cart observes the client's separate POST /orders call" because Cart has no dependency
+# edge to Order in either direction (architecture.md) and cannot itself observe a call made to a
+# different service — a synchronous, Cart-owned trigger is the only way Cart's own Outbox can fire
+# reliably. The client is expected to call this endpoint and then separately call Order's own
+# `POST /orders` (out of scope here, Order's own contract) with its own copy of the cart contents;
+# Cart's response to this endpoint is not itself a precondition Order checks (no coupling exists).
+#
+# Verb-level-contract note (resolves requirement-spec Decision D9, non-blocking handoff): `/cart`'s
+# per-verb semantics are: `GET` reads the caller's current cart (creating no row until first
+# mutation); `POST /v1/cart/items` adds a line item or additively increases quantity on an existing
+# one (ddd-model.md invariant 3, "quantity is additive onto the existing line, never a duplicate
+# line for the same Sku"); `PUT /v1/cart/items/{sku}` idempotently sets a line item's quantity to an
+# exact value (creating the line if absent); `DELETE /v1/cart/items/{sku}` removes a line item
+# entirely.
+#
+# Validation note (edge-cases.md "Stale cart references a deleted or out-of-stock product" — lazy
+# validation at checkout was chosen over proactive checks): no endpoint below validates `sku`
+# against `kart-product-service`'s catalog at add/update time. Any string is accepted as a `sku` at
+# mutation time; the only sku-aware check performed inline is the checkout-time gRPC pre-check
+# (design-decisions.md's "Resilience Pattern for Checkout-Time Stock/Price Validation"), which is an
+# internal Cart-outbound call and not part of this document's inbound surface.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-cart-service API
+  version: 1.0.0
+  description: >
+    The mutable, pre-checkout basket: lifecycle (add/update/remove line items), merge
+    (guest-session cart reconciled into a logged-in user's cart at login), and checkout
+    hand-off. Per requirement-spec.md §1, Cart stands alone as its own bounded context — no
+    ADR merges it with a sibling BRD row. Expiry (Decision D1) is infra-level Redis TTL /
+    PostgreSQL soft-expiry config (ddd-model.md Modeling Decision #2) and has no dedicated
+    endpoint of its own.
+
+servers:
+  - url: https://api.kart.example/cart
+    description: >
+      Public API Gateway. Serves every path below — reachable by Client/Web/Mobile
+      (architecture.md Dependencies table, "Inbound (client, via API Gateway)").
+
+security:
+  - bearerAuth: []
+  - guestSessionAuth: []
+
+paths:
+  /v1/cart:
+    get:
+      operationId: getCurrentCart
+      summary: Get the caller's current cart (logged-in user or guest session).
+      description: >
+        Scoped implicitly to the caller's own identity — `Authorization: Bearer` for a
+        logged-in user's cart, or `X-Guest-Session-Id` for an anonymous session's cart — never
+        by a `cartId` path parameter, since a Cart is a per-owner singleton (ddd-model.md
+        invariant 1). Returns `200` with an empty `items` array if the caller has no persisted
+        cart yet (no row is created until the first mutation) — this is not a `404` condition;
+        an "empty cart" is a normal, expected state for any owner who hasn't added anything yet.
+      responses:
+        '200':
+          description: The caller's current cart.
+          headers:
+            ETag:
+              description: Current `CartVersion` (design-decisions.md optimistic concurrency).
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CartResponse' }
+        '401':
+          description: Neither a valid `Authorization` bearer token nor `X-Guest-Session-Id` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/cart/items:
+    post:
+      operationId: addCartItem
+      summary: Add a line item, or additively increase quantity if the SKU is already present.
+      description: >
+        Additive: if `sku` already has a `CartLineItem` in the caller's cart, `quantity` is
+        added onto the existing line's quantity (ddd-model.md invariant 3) rather than creating
+        a duplicate line. If `sku` is new to the cart, a `CartLineItem` is created with
+        `availability = Available`. `sku` is accepted as an opaque string and not validated
+        against the catalog at this point (see this file's header "Validation note").
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: Optional `CartVersion` precondition (see this file's header "Concurrency note").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sku, quantity]
+              properties:
+                sku: { type: string }
+                quantity: { type: integer, minimum: 1, description: "Amount to add onto the existing line, or the initial quantity for a new line." }
+      responses:
+        '200':
+          description: Updated cart.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CartResponse' }
+        '400':
+          description: Missing/invalid `sku`, or `quantity` not a positive integer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Neither a valid `Authorization` bearer token nor `X-Guest-Session-Id` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: >
+            `If-Match` supplied and stale (version-conflict, retry after a fresh `GET`), **or**
+            adding this `sku` as a new distinct line item would exceed the 100-distinct-line-item
+            cap (requirement-spec Decision D4 / ddd-model.md invariant 2) — distinguished by
+            `ErrorResponse.code` (`VERSION_CONFLICT` vs. `CART_LINE_ITEM_LIMIT_EXCEEDED`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/cart/items/{sku}:
+    put:
+      operationId: setCartItemQuantity
+      summary: Idempotently set a line item's quantity to an exact value (creates the line if absent).
+      description: >
+        Unlike `POST /v1/cart/items`, this replaces (does not add onto) the line's quantity.
+        Standard REST `PUT` semantics: calling it repeatedly with the same body converges on the
+        same state, never compounding.
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: Optional `CartVersion` precondition (see this file's header "Concurrency note").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity: { type: integer, minimum: 1, description: "To remove a line entirely, use DELETE instead of setting quantity to 0." }
+      responses:
+        '200':
+          description: Updated cart.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CartResponse' }
+        '400':
+          description: "`quantity` not a positive integer."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Neither a valid `Authorization` bearer token nor `X-Guest-Session-Id` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: >
+            `If-Match` supplied and stale, **or** this `sku` is new to the cart and creating it
+            would exceed the 100-distinct-line-item cap — distinguished by `ErrorResponse.code`
+            (`VERSION_CONFLICT` vs. `CART_LINE_ITEM_LIMIT_EXCEEDED`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    delete:
+      operationId: removeCartItem
+      summary: Remove a line item from the cart.
+      description: >
+        Idempotent by standard REST `DELETE` semantics: returns `204` whether or not `sku` was
+        present in the cart (removing an already-absent line is a no-op success, not a `404`).
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: Optional `CartVersion` precondition (see this file's header "Concurrency note").
+      responses:
+        '204':
+          description: Line item removed (or already absent).
+        '401':
+          description: Neither a valid `Authorization` bearer token nor `X-Guest-Session-Id` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: "`If-Match` supplied and stale (version-conflict, retry after a fresh `GET`)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/cart/merge:
+    post:
+      operationId: mergeGuestCartIntoUserCart
+      summary: Merge the guest (anonymous-session) cart identified by `X-Guest-Session-Id` into the caller's logged-in cart.
+      description: >
+        Requires **both** a valid `Authorization` bearer token (identifies the target,
+        logged-in user's cart) and `X-Guest-Session-Id` (identifies the source guest cart) on
+        the same request — this is the one endpoint where both security schemes are required
+        together, not as alternatives. Conflict rule (requirement-spec Decision D2, ddd-model.md
+        Modeling Decision #1): quantities are summed for SKUs present in both carts; SKUs
+        present in only one cart are kept (union); the merged result is capped at 100 distinct
+        line items, dropping the lowest-value overflow if the cap would otherwise be exceeded —
+        this never produces a `409`, unlike direct `/v1/cart/items` mutation. On success, the
+        guest cart is deleted (ddd-model.md Modeling Decision #1), which is what makes this
+        endpoint naturally safe to retry (see this file's header "Idempotency-Key note").
+      responses:
+        '200':
+          description: >
+            The merged (or, if the referenced guest cart no longer exists — e.g. already merged
+            by a prior, retried call — the caller's unchanged) cart.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CartResponse' }
+        '401':
+          description: Missing/invalid `Authorization` bearer token, or missing `X-Guest-Session-Id`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/cart/checkout:
+    post:
+      operationId: checkoutCart
+      summary: Transition the cart to CheckedOut and publish CartCheckedOut (Analytics-only, per ADR-0007).
+      description: >
+        Resolves requirement-spec Decision D8 — see this file's header "Checkout-wiring note".
+        Transitions `CartStatus` `Active` -> `CheckedOut` (ddd-model.md invariant 4, terminal)
+        and publishes `CartCheckedOut` via the Transactional Outbox in the same transaction
+        (design-decisions.md). Naturally idempotent: calling this again on an already-`CheckedOut`
+        cart is a no-op that returns the same terminal state and does not re-publish the event.
+        Does **not** call, wait for, or gate `POST /orders` on `kart-order-service` — there is no
+        dependency edge between the two services (architecture.md); the client is expected to
+        call Order's own endpoint separately.
+      responses:
+        '200':
+          description: Cart is now (or already was) `CheckedOut`.
+          headers:
+            ETag:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CartResponse' }
+        '401':
+          description: Neither a valid `Authorization` bearer token nor `X-Guest-Session-Id` was supplied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: The cart has no line items (`CART_EMPTY`) — there is nothing to check out.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Identifies a logged-in user's `CartOwner` by the `UserId` claim (issued and owned by
+        kart-identity-service, per ubiquitous-language.md; Cart never models authentication,
+        token issuance, or session lifecycle itself).
+    guestSessionAuth:
+      type: apiKey
+      in: header
+      name: X-Guest-Session-Id
+      description: >
+        Opaque anonymous-session identifier, modeled locally by Cart as one of the two possible
+        `CartOwner` shapes (ubiquitous-language.md; ddd-model.md Modeling Decision #4) — no other
+        bounded context currently claims ownership of an anonymous-session concept.
+
+  schemas:
+    LineItemAvailability:
+      type: string
+      enum: [Available, FlaggedUnavailable]
+      description: >
+        Set to `FlaggedUnavailable` only by consuming `InventoryReservationFailed` pre-checkout
+        (requirement-spec Decision D3, ddd-model.md); cleared back to `Available` on the line
+        item's next successful validation. Never set or cleared by any endpoint in this document —
+        this is an async, event-driven field, surfaced here read-only.
+
+    CartStatus:
+      type: string
+      enum: [Active, CheckedOut]
+      description: >
+        `CheckedOut` is terminal (ddd-model.md invariant 4) — set only by `POST /v1/cart/checkout`.
+
+    CartOwnerType:
+      type: string
+      enum: [User, Guest]
+      description: Which of the two mutually exclusive `CartOwner` shapes (ubiquitous-language.md) this cart belongs to.
+
+    CartLineItem:
+      type: object
+      required: [sku, quantity, availability]
+      properties:
+        sku: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        availability: { $ref: '#/components/schemas/LineItemAvailability' }
+
+    CartResponse:
+      type: object
+      required: [cartId, ownerType, status, items]
+      properties:
+        cartId: { type: string, description: "Cart aggregate's own identity (ddd-model.md). Informational only — every endpoint above scopes by caller identity, never by this id." }
+        ownerType: { $ref: '#/components/schemas/CartOwnerType' }
+        status: { $ref: '#/components/schemas/CartStatus' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CartLineItem' }
+          maxItems: 100
+          description: At most 100 distinct line items (requirement-spec Decision D4).
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "VERSION_CONFLICT"
+          description: "One of: VERSION_CONFLICT, CART_LINE_ITEM_LIMIT_EXCEEDED, CART_EMPTY, VALIDATION_ERROR, UNAUTHORIZED."
+        message: { type: string }
+        timestamp: { type: string, format: date-time }

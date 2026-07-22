@@ -35,7 +35,7 @@ See [full architecture doc](../services/kart-product-service/architecture.md).
 | Outbound | Search, Recommendation, Analytics | `ProductCreated` | Async |
 | Outbound | Search, Wishlist, Offer, Analytics | `ProductPriceChanged` | Async |
 | Outbound | Analytics (confirmed); others TBD | `ProductUpdated` | Async |
-| Outbound (proposed, not yet consumed) | — | `ProductDiscontinued` | Async |
+| Outbound | Search, Wishlist, Analytics | `ProductDiscontinued` | Async |
 
 No synchronous outbound dependency on any other service, including Category — see this service's `architecture.md` for why a Category dependency is deliberately **not** added (Category's own approved docs state no live sync mechanism, sync or async, connects the two services today). Not a participant in the Order Saga (BRD §5.5 reaches Product only from the Gateway). Admin/Partner API write availability is coupled to Product's own write-path uptime (unavoidable, since they call Product's own API per ADR-0010) but this coupling does not chain further.
 
@@ -65,7 +65,7 @@ See [full architecture doc](../services/kart-delivery-tracking-service/architect
 | Outbound (external, not a Kart service) | Per-carrier tracking APIs | Scheduled polling (6h staleness threshold) | Sync (outbound REST) |
 | Outbound | Order (terminal `"delivered"` status only), Notification, Analytics | `DeliveryStatusUpdated` | Async |
 
-No synchronous outbound dependency on any other Kart service. Not a participant in the Order Saga (BRD §12) — Bus fan-out consumer only. Its `DeliveryStatusUpdated` consumer set is corrected here to include Order per [ADR-0005](../adr/0005-unify-order-terminal-event.md) — this service's own `requirement-spec.md` still lists Notification/Analytics only, which predates that ADR. Its largest integration surface (per-carrier webhooks/polling) is external, not a Kart peer, and is not represented as a node in this graph.
+No synchronous outbound dependency on any other Kart service. Not a participant in the Order Saga (BRD §12) — Bus fan-out consumer only. Its `DeliveryStatusUpdated` consumer set includes Order per [ADR-0005](../adr/0005-unify-order-terminal-event.md); this service's own `requirement-spec.md` has since been corrected to match. Its largest integration surface (per-carrier webhooks/polling) is external, not a Kart peer, and is not represented as a node in this graph.
 
 ## kart-payment-service
 
@@ -166,10 +166,11 @@ See [full architecture doc](../services/kart-cart-service/architecture.md).
 |---|---|---|---|
 | Inbound (client) | Client / Checkout UI via API Gateway | `/cart`, `POST /cart/merge` | Sync |
 | Inbound | Inventory | `InventoryReservationFailed` | Async |
+| Inbound | User Service | `UserDataErased` | Async |
 | Outbound | Analytics | `CartCheckedOut` | Async |
 | Outbound (best-effort, fails open) | Product, Inventory | Lazy stock/price validation (gRPC) | Sync |
 
-One synchronous outbound edge only, guarded by timeout + circuit breaker and failing open on breaker-open/timeout — never a hard gate on checkout initiation. Not a participant in the Order Saga (BRD §12); no dependency edge to Order in either direction — `CartCheckedOut` is Analytics-only, and Order's own creation trigger (`POST /orders`) bypasses Cart entirely (ADR-0007).
+One synchronous outbound edge only, guarded by timeout + circuit breaker and failing open on breaker-open/timeout — never a hard gate on checkout initiation. Not a participant in the Order Saga (BRD §12); no dependency edge to Order in either direction — `CartCheckedOut` is Analytics-only, and Order's own creation trigger (`POST /orders`) bypasses Cart entirely (ADR-0007). `UserDataErased` is a new async inbound edge added by this pass — **ADR-0016** was updated to name Cart directly as an expected consumer, closing a gap found during this service's own documentation pass; triggers hard deletion of the erased user's `Cart` row(s) and Redis entry.
 
 ## kart-inventory-service
 
@@ -215,10 +216,12 @@ See [full architecture doc](../services/kart-wishlist-service/architecture.md).
 |---|---|---|---|
 | Inbound (client) | Client/Mobile/Web via API Gateway | `/wishlist` (add/list/remove) | Sync |
 | Inbound | Product | `ProductPriceChanged` | Async |
+| Inbound | Product | `ProductDiscontinued` | Async |
+| Inbound | User Service | `UserDataErased` | Async |
 | Outbound | Notification, Analytics | `WishlistPriceAlertTriggered` | Async |
 | Outbound (background job only) | Product | `GET /products/{id}` (hourly reconciliation) | Sync |
 
-No synchronous outbound dependency sits on the request/critical path — the one synchronous edge (`GET /products/{id}`) is scoped entirely to an hourly reconciliation job, never to `/wishlist` reads or `ProductPriceChanged` alert evaluation. Not a participant in the Order Saga (BRD §12). Write-side datastore ambiguity carried from requirement-spec §6 item 4 resolved in `architecture.md`: PostgreSQL write side + MongoDB read side, following the platform's default CQRS split — not a deliberate Mongo-only exception.
+No synchronous outbound dependency sits on the request/critical path — the one synchronous edge (`GET /products/{id}`) is scoped entirely to an hourly reconciliation job, never to `/wishlist` reads or `ProductPriceChanged` alert evaluation. Not a participant in the Order Saga (BRD §12). Write-side datastore ambiguity carried from requirement-spec §6 item 4 resolved in `architecture.md`: PostgreSQL write side + MongoDB read side, following the platform's default CQRS split — not a deliberate Mongo-only exception. `ProductDiscontinued` (now approved, `kart-product-service/event-contract.md`) and `UserDataErased` (ADR-0016, which already names Wishlist by name) are two new async inbound edges added by this pass, both consistent with `kart-product-service`'s and `kart-user-service`'s own already-approved docs — neither introduces a synchronous dependency or changes the Distributed-Monolith Risk assessment below.
 
 ## kart-category-service
 
