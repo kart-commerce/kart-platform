@@ -195,4 +195,20 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Sku / Product | kart-product-service | `CartLineItem.sku` is a reference only, resolved via a synchronous, fail-open lazy-validation call at checkout time; Cart never owns catalog or price data |
 | UserId | kart-identity-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself |
 | Order | kart-order-service | `CartCheckedOut` is published for Analytics only; Cart never models Order's own Saga/state machine, and Order's creation trigger (`POST /orders`) bypasses Cart entirely |
+
+## Owned by `kart-wishlist-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| WishlistEntry | A user's saved tracking of one product SKU for price-drop alerting; unique per `(userId, sku)` pair | Aggregate root |
+| ReferencePrice | The price baseline a WishlistEntry's 5%-drop evaluation runs against; set at add-time, reset to the alerted price each time an alert fires | Value object |
+| AlertCooldownState | The `lastAlertedAt` timestamp backing a WishlistEntry's 24-hour-per-pair alert cooldown | Value object |
+| WishlistEntryStatus | The `Active`/`Stale` state of a WishlistEntry; set to `Stale` by a `ProductDiscontinued` event or the reconciliation job, never itself deleting the row | Value object |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-wishlist-service` uses it |
+|---|---|---|
+| Sku / Variant / ProductDiscontinued | kart-product-service | `WishlistEntry.sku` is a reference only; `ProductDiscontinued` (consumed) transitions a WishlistEntry to `Stale`, never redefined locally |
+| UserId / UserDataErased | kart-user-service / kart-identity-service | `WishlistEntry.userId` is an opaque reference; consuming `UserDataErased` (ADR-0016) deletes every WishlistEntry for that `userId` — Wishlist never models identity or erasure workflow beyond reacting to this event |
 | InventoryReservationFailed | kart-inventory-service | Consumed only to flag a `CartLineItem`'s availability pre-checkout; Cart never models Inventory's own reservation aggregate |

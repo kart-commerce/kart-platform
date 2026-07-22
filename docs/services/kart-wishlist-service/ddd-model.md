@@ -1,0 +1,61 @@
+---
+doc_type: ddd-model
+service: kart-wishlist-service
+status: approved
+generated_by: ddd-agent
+source: docs/services/kart-wishlist-service/requirement-spec.md, docs/services/kart-wishlist-service/edge-cases.md, docs/services/kart-wishlist-service/design-decisions.md, docs/services/kart-wishlist-service/architecture.md, docs/ddd/ubiquitous-language.md, docs/adr/0016-user-gdpr-erasure-policy.md
+---
+
+# DDD Model: kart-wishlist-service
+
+One aggregate root, one bounded context. Wishlist's own domain is small and single-purpose — track which products a user has saved, and decide whether a price movement on one of them is alert-worthy — so a single aggregate, evaluated independently per `(userId, sku)` pair, is sufficient; there is no invariant here that spans multiple pairs and needs a coarser transaction boundary (the same conclusion `kart-category-service/ddd-model.md` reached for its own single-aggregate bounded context).
+
+## Aggregate: WishlistEntry
+
+**Entity:** `WishlistEntry` — identified by `WishlistEntryId`, unique on `(userId, sku)` (requirement-spec §4: "a wishlist entry belongs to exactly one user"; no BRD-stated or inferred reason a user could hold two independent entries for the same SKU). `userId` references `kart-user-service`'s/`kart-identity-service`'s own identity, never redefined here — accessed only as an opaque foreign key, per the Anti-Corruption Layer rule. `sku` references `kart-product-service`'s `Variant` the same way (`ubiquitous-language.md`).
+
+**Value objects:**
+- `ReferencePrice` — the price baseline a `WishlistEntry`'s 5%-drop evaluation runs against (requirement-spec §4). Set to the price observed at add-time (edge-cases.md's "Wishlist Entry Added After the Price Drop Already Happened" decision — no retroactive backfill), and reset to the newly-alerted price every time `WishlistPriceAlertTriggered` fires, so the next evaluation requires another 5%+ drop from that new, lower point.
+- `AlertCooldownState` — `lastAlertedAt` (nullable timestamp); backs the 24-hour-per-`(userId, sku)` cooldown (requirement-spec §4, §6 item 3). Distinct from the redelivery-idempotency dedup record below — this throttles genuinely distinct qualifying drops, not repeated delivery of the same one.
+- `WishlistEntryStatus` — `Active | Stale`; set to `Stale` by either the `ProductDiscontinued` event handler or the hourly reconciliation job (requirement-spec §2, §4; `edge-cases.md`'s "Stale Wishlist Entry" decision) — a stale entry is excluded from `ProductPriceChanged` evaluation and surfaced to the client as no-longer-purchasable, but is not itself deleted (only a `UserDataErased` event or an explicit user-initiated removal deletes a `WishlistEntry` row).
+
+**Not modeled as part of this aggregate (technical/infrastructure constructs, Database Design Agent's job, same precedent as every other service's Outbox table):**
+- The Transactional Outbox row backing reliable publication of `WishlistPriceAlertTriggered` (`design-decisions.md`, "Idempotent Alert Publication").
+- The `(userId, sku, priceObserved)` redelivery-dedup record (`design-decisions.md`, same decision) — a technical idempotency guard, not a domain concept `WishlistEntry` itself needs to reason about beyond the invariant it exists to satisfy (below).
+- The Redis-backed per-user batching/digest accumulator (`design-decisions.md`, "State-Store Mechanism for the Per-User Alert Batching/Digest Window") — an application-layer publish-cadence mechanism sitting downstream of a `WishlistEntry`'s own qualify/don't-qualify decision, not a domain entity.
+
+**Invariants:**
+- A `(userId, sku)` pair maps to at most one `WishlistEntry` — enforced via a unique constraint, checked at add-time (requirement-spec §4).
+- **Price-drop alert threshold:** a `ProductPriceChanged` is alert-worthy for a `WishlistEntry` only if the new price is at least 5% below its current `ReferencePrice` (requirement-spec §4, §6 item 2).
+- **Alert cooldown:** at most one `WishlistPriceAlertTriggered` per `WishlistEntry` per rolling 24-hour window, regardless of how many further qualifying drops occur inside it (requirement-spec §4, §6 item 3).
+- **Idempotent publication:** a redelivered `ProductPriceChanged` for a price already alerted on for this entry must not re-trigger a second `WishlistPriceAlertTriggered` — enforced via the dedup record described above, checked before the Outbox write (requirement-spec §4; `edge-cases.md`'s "Duplicate Alert Delivery" decision).
+- **No retroactive alert at add-time:** `ReferencePrice` is set to the price observed when the entry is created; only subsequent `ProductPriceChanged` events are evaluated against it (`edge-cases.md`'s "Wishlist Entry Added After the Price Drop Already Happened" decision).
+- **Stale-entry marking is one-directional and non-destructive:** a `ProductDiscontinued` event or a reconciliation-job finding transitions `WishlistEntryStatus` to `Stale` and suppresses further `ProductPriceChanged` evaluation for that entry, but never deletes the row — a user can still see (and manually remove) a stale entry (requirement-spec §2, §4).
+- **Maximum wishlist size per user (resolves requirement-spec §6 item 6, carried to this stage):** a user may hold at most **500 active `WishlistEntry` rows**. Enforced at add-time via a count check (`SELECT count(*) WHERE userId = ? AND status = 'active' FOR UPDATE`, then insert) inside the same transaction as the new row's creation — not a separate aggregate wrapping "a user's whole wishlist," since the only cross-entry rule is this one bounded count, which a transactional count-then-insert already satisfies without a coarser consistency boundary (the same reasoning `kart-category-service/ddd-model.md` used to reject a wrapping `CategoryTree` aggregate). **Why 500:** the BRD states no number; 500 is generous enough that no ordinary shopper is realistically constrained by it (avoiding an artificial product-experience limit no requirement calls for), while still bounding the per-user footprint of both the hourly reconciliation job's per-SKU fan-out (`architecture.md`) and the `ProductPriceChanged` evaluation cost per event — an unbounded wishlist would let a single pathological account (e.g. a scraping bot) impose unbounded per-event evaluation cost. **Trade-off accepted:** a plain, revisitable config value, not a hardcoded architectural ceiling; a legitimate power-user request for more is a product decision for a future BRD revision, not something this pass invents grounds to pre-empt.
+- **GDPR erasure (ADR-0016):** on consuming `UserDataErased` for a `userId`, every `WishlistEntry` for that `userId` — and its associated `AlertCooldownState`/`ReferencePrice` and dedup record — is deleted outright, not tombstoned (requirement-spec §2, §4; `design-decisions.md`'s "Erasure Mechanism for `UserDataErased`" decision; `edge-cases.md`'s "Residual Wishlist State" decision). A redelivered `UserDataErased` for an already-erased `userId` finds nothing to delete and is a no-op.
+
+**Domain events:**
+- `WishlistPriceAlertTriggered` (published — existing, BRD §5.4/§10 as amended by **ADR-0007**; payload `userId`, `sku`, `oldPrice`, `newPrice`, finalized in `event-contract.md`). Raised when a `WishlistEntry`'s price-drop-threshold and cooldown invariants are both satisfied by an incoming `ProductPriceChanged` — the actual outbound publish to `ecommerce.events` happens at the per-user batching/digest flush (`design-decisions.md`), with the payload's `newPrice` re-checked against the live price immediately before send (`edge-cases.md`'s "Price Rebound During the Batching/Digest Window" decision) rather than reusing the value captured at qualify-time verbatim.
+
+**Consumed events:**
+- `ProductPriceChanged` (Product Service) — drives the price-drop-threshold/cooldown evaluation above.
+- `ProductDiscontinued` (Product Service, newly formalized this pass) — transitions the matching `WishlistEntry` to `Stale`.
+- `UserDataErased` (User Service, ADR-0016) — deletes every `WishlistEntry` (and associated state) for the erased `userId`.
+
+## Cross-Aggregate / Cross-Context Interaction
+
+There is no second aggregate in this bounded context, so there is no cross-aggregate transaction to reason about within Wishlist itself. Cross-context relationships are all reference-only, never redefined here:
+
+- `userId` — owned by Identity/User Service; Wishlist holds it only as an opaque foreign key, and deletes every row keyed on it upon `UserDataErased` (ADR-0016) rather than ever mutating identity data itself.
+- `sku` — owned by `kart-product-service`'s `Variant`; Wishlist never caches Product's catalog facts (name, price, availability) beyond the one `ReferencePrice` value object it needs for its own threshold evaluation (`architecture.md`'s Boundary Rationale — "Wishlist never owns product catalog truth").
+
+## Modeling Decisions & Assumptions (resolved here, not escalated — engineering defaults, revisable)
+
+1. **`WishlistEntry` is the sole aggregate root — no wrapping "Wishlist" (per-user collection) aggregate.** Every invariant that could look like a cross-entry rule (the max-500 cap) is satisfiable with a transactional count-then-insert against individual rows, the same test `kart-category-service/ddd-model.md` already applied to reject an analogous wrapping aggregate for its own single-aggregate context.
+2. **`ReferencePrice` and `AlertCooldownState` are modeled as value objects owned by `WishlistEntry`, not separate entities**, because neither has identity or a lifecycle independent of the entry describing it — both are overwritten in place on every qualifying alert, never referenced in isolation.
+3. **The redelivery-dedup record and Outbox row are deliberately excluded from this model** (see "Not modeled" above) — they are technical idempotency/reliable-delivery constructs the Database Design Agent owns, the same boundary `kart-category-service/ddd-model.md` and `kart-offer-service/ddd-model.md` already draw around their own Outbox tables.
+
+## Sign-off
+
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to API/Database/Event Design Agents

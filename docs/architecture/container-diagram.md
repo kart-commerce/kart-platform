@@ -36,6 +36,7 @@ graph TB
     Product -. ProductPriceChanged .-> Analytics
     Product -. ProductUpdated .-> Analytics
     Product -. ProductPriceChanged .-> Wishlist
+    Product -. ProductDiscontinued .-> Wishlist
     Wishlist -->|"sync, GET /products/{id}, hourly reconciliation job only — not on the /wishlist request path"| Product
 
     Order -. OrderDelivered .-> Recommendation
@@ -126,6 +127,7 @@ graph TB
     Identity -. UserRegistered .-> Notification
     UserSvc -. UserNotificationPreferenceUpdated .-> Notification
     UserSvc -. UserDataErased .-> Analytics
+    UserSvc -. UserDataErased .-> Wishlist
     Notification -. NotificationSent .-> Analytics
 ```
 

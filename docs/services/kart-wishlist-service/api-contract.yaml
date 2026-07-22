@@ -1,0 +1,226 @@
+# doc_type: api-contract
+# service: kart-wishlist-service
+# status: approved
+# generated_by: api-design-agent
+# source: docs/services/kart-wishlist-service/requirement-spec.md,
+#         docs/services/kart-wishlist-service/edge-cases.md,
+#         docs/services/kart-wishlist-service/design-decisions.md,
+#         docs/services/kart-wishlist-service/architecture.md,
+#         docs/services/kart-wishlist-service/ddd-model.md,
+#         docs/standards/kart-conventions.md (API Versioning section)
+#
+# No breaking-change risk: first issue of this contract, nothing published to a
+# shared-contracts repo yet. Publishing a stable copy to kart-shared is deferred
+# until that repo exists in this pipeline's scope.
+#
+# Money-adjacent Idempotency-Key rule (api-standards.md): not applicable — no
+# endpoint here mutates money-adjacent state (ddd-model.md: WishlistEntry holds
+# only sku/referencePrice/status, never price or payment data).
+#
+# Path-naming note (api-standards.md "plural nouns" convention, same recognized
+# exception `kart-cart-service/api-contract.yaml` already documents for /v1/cart):
+# `/wishlist` is deliberately kept singular, not pluralized to `/wishlists`,
+# because it is a per-caller-identity singleton resource — exactly one Wishlist
+# per authenticated user (ddd-model.md: WishlistEntry unique per (userId, sku),
+# userId always the caller's own) — and because requirement-spec.md §5 already
+# names the literal BRD path `/wishlist` (BRD §5.4).
+#
+# Verb/sub-path resolution (closes requirement-spec.md §6 item 5, carried to
+# this stage): three operations — list, add, remove — matching the FR's
+# "add item, list items, remove item" (requirement-spec §2). No PATCH/update
+# endpoint: a WishlistEntry has no user-editable field once added (its
+# ReferencePrice/status are system-managed, ddd-model.md) — removing and
+# re-adding is the only way to reset it, and nothing in the BRD or this
+# service's own docs asks for an update-in-place operation.
+#
+# Auth: every endpoint requires a Customer-scoped bearer JWT (Identity-issued,
+# per BRD §24.1: "Customer | Own resources only (userId match) | Manage own
+# cart, orders, wishlist"). userId is always taken from the token's own claim,
+# never from a path/query parameter — there is no "view another user's
+# wishlist" operation in this contract.
+
+openapi: 3.0.3
+info:
+  title: kart-wishlist-service API
+  version: 1.0.0
+  description: >
+    Saved items + price-drop alerts (BRD §2.1 item 13). Add/list/remove a
+    product SKU on the caller's own wishlist; price-drop alerting itself
+    (WishlistPriceAlertTriggered) is an async, event-driven concern with no
+    synchronous endpoint (requirement-spec.md §2, §5; event-contract.md).
+
+servers:
+  - url: /v1
+
+paths:
+  /wishlist:
+    get:
+      operationId: listWishlist
+      summary: List the caller's own wishlist entries.
+      description: >
+        Read-only, served from the MongoDB read model (database-design.md) —
+        the P95 < 150ms / P99 < 400ms read-path NFR (requirement-spec §3)
+        applies here. Excludes entries whose WishlistEntryStatus is Stale
+        from the default view unless includeStale is set (ddd-model.md's
+        Stale marking is non-destructive — the row still exists for the
+        client to see and remove).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: includeStale
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: >
+            Include entries whose product was discontinued (ProductDiscontinued
+            consumed, or found stale by the reconciliation job) instead of
+            filtering them out of the default view.
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque pagination cursor from a previous response's nextCursor.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: The caller's wishlist entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/WishlistEntry' }
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    post:
+      operationId: addWishlistEntry
+      summary: Add a product SKU to the caller's own wishlist.
+      description: >
+        Creates a WishlistEntry with ReferencePrice set to the price observed
+        right now (ddd-model.md — no retroactive alert for an already-discounted
+        product, edge-cases.md's "Wishlist Entry Added After the Price Drop
+        Already Happened" decision). Rejects if the (userId, sku) pair already
+        exists, or if the caller is already at the 500-active-entry cap
+        (ddd-model.md invariant).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sku]
+              properties:
+                sku: { type: string }
+      responses:
+        '201':
+          description: Entry created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WishlistEntry' }
+        '400':
+          description: Validation error, or sku does not resolve to an active Product Service Variant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: >
+            sku is already on the caller's wishlist, or the caller already
+            holds 500 active entries (ddd-model.md's max-wishlist-size invariant).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /wishlist/{sku}:
+    delete:
+      operationId: removeWishlistEntry
+      summary: Remove a product SKU from the caller's own wishlist.
+      description: >
+        Idempotent by standard REST DELETE semantics — removing an sku already
+        absent from the caller's wishlist (or never present) returns 204, not
+        404, so a client retry after a dropped response is always safe.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Entry removed (or was already absent).
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Identifies the caller's own userId by the token's Identity-issued
+        claim (BRD §24.1: Customer role, own-resources-only). Wishlist never
+        models authentication, token issuance, or session lifecycle itself.
+
+  schemas:
+    WishlistEntry:
+      type: object
+      required: [sku, referencePrice, status, addedAt]
+      properties:
+        sku:
+          type: string
+        referencePrice:
+          type: number
+          format: double
+          description: >
+            The price baseline this entry's 5%-drop evaluation runs against
+            (ddd-model.md ReferencePrice) — the price observed at add-time,
+            reset to the alerted price each time WishlistPriceAlertTriggered fires.
+        status:
+          type: string
+          enum: [active, stale]
+          description: >
+            stale = the product was discontinued (ProductDiscontinued consumed,
+            or found stale by the hourly reconciliation job) — the entry still
+            exists and can be removed, but is no longer evaluated against
+            incoming ProductPriceChanged events.
+        addedAt:
+          type: string
+          format: date-time
+
+    Problem:
+      type: object
+      description: RFC 7807-style problem details.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: wishlist_size_limit_exceeded
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
