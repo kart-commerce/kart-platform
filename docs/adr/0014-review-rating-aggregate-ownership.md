@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0014: Review Owns the Canonical Rating Aggregate; Product Consumes `ReviewSubmitted` for a Denormalized Copy
 
 ## Status
 
-Proposed (final ADR number assigned in a later pipeline pass)
+Accepted
 
 ## Context
 

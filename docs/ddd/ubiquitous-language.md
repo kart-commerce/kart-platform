@@ -118,6 +118,25 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 |---|---|---|
 | Order (`orderId`) | kart-order-service | `Reservation.orderId` is a reference only; Inventory never models Order's own Saga/state machine, it only reacts to `OrderCancelled`/`OrderCompensationTriggered` |
 
+## Owned by `kart-product-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Product | The parent/grouping catalog record (name, description, category, brand) shared by one or more sellable Variants; never itself priced or orderable | Aggregate root |
+| ProductStatus | The `Draft`/`Published`/`Archived` lifecycle of a Product; `Archived` cascades to discontinuing every child Variant | Value object |
+| Variant | The actual sellable, priced unit — one row per SKU, referencing its parent Product; the aggregate every catalog event and the SKU-keyed read model are scoped to | Aggregate root |
+| Sku | The globally unique identifier for a Variant, enforced via a PostgreSQL unique constraint independent of the read model's `category.id` shard key | Value object |
+| VariantStatus | The `Active`/`Discontinued` soft-delete state of a Variant; discontinuation is one-directional, never reinstated | Value object |
+| ProductAttributes | The hybrid EAV/JSONB attribute set for a Variant — first-class indexed `size`/`color` columns plus a schemaless `extendedAttributes` bag | Value object |
+| ProductDiscontinued | Domain event (formalized at the DDD Agent stage from a requirement-spec/edge-cases proposal): fired when a Variant's status moves to Discontinued; unblocks `kart-search-service`'s and `kart-wishlist-service`'s own already-approved consumption plans | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-product-service` uses it |
+|---|---|---|
+| Category | kart-category-service | `Product.categoryId` is a caller-supplied reference only; never independently validated or refreshed against Category |
+| Rating / `ReviewSubmitted` / `ReviewUpdated` | kart-review-service | Consumed only to maintain a denormalized `ratingSummary` projection (ADR-0014); Review owns the canonical rating aggregate |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |

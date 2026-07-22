@@ -1,7 +1,7 @@
 ---
 doc_type: architecture
 service: kart-product-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
 source: docs/services/kart-product-service/requirement-spec.md
 ---
@@ -31,7 +31,7 @@ The variant/attribute data model itself (hybrid EAV/JSONB — requirement-spec �
 | Inbound | Recommendation Service | `GET /products/{id}` | **Sync** (REST), timeout-guarded, **caller fails open** | New dependency, resolved on Recommendation's side (`kart-recommendation-service/architecture.md`): a request-time check for discontinued/catalog status, alongside a separate `GET /inventory/{sku}` call to Inventory for stock level — two different domain facts, neither substitutes for the other. Recommendation degrades to serving unfiltered results on timeout/error rather than failing its own request; this coupling is the caller's risk to manage, not a dependency Product itself takes on. |
 | Inbound | Cart Service | Lazy stock/price validation call | **Sync** (gRPC), timeout-guarded + circuit breaker, **caller fails open** | New dependency, resolved on Cart's side (`kart-cart-service/architecture.md`): a best-effort, checkout-time-only pre-check, never a gate (Inventory alone enforces the oversell invariant). Cart's own doc flags that this implies Product must expose an **internal gRPC endpoint** for this call — today Product's only documented public surface is REST (`GET /products/{id}`); `kart-inventory-service/architecture.md` independently flags the identical gap on its own side. Recorded here as a real, not-yet-reconciled API-surface question, carried to the **API Design Agent** — resolving it does not change this edge's direction or type. |
 | Inbound (consumed) | Review | `ReviewSubmitted` event | **Async** | Rating-recalc denormalization only, per **ADR-0014**: Review owns the canonical rating aggregate; Product's `product_read_model.ratingSummary` is an independent, eventually-consistent projection of the same event stream — never a synchronous read-back to Review. |
-| Inbound (consumed) | Review | `ReviewUpdated` event (new) | **Async** | **Gap found and closed at this stage:** `kart-review-service/architecture.md` (already drafted) names Product as a confirmed consumer of `ReviewUpdated` — fired on an author edit within the 30-day edit window, so Product can adjust `ratingSummary` incrementally instead of re-deriving it from a fresh `ReviewSubmitted`. This is **not yet reflected in `kart-product-service/requirement-spec.md`** (which predates Review's introduction of this event) — flagged here rather than silently adopted or silently ignored; requirement-spec should pick up this consumed input by citation the next time it is revisited, the same way this platform's ADRs get cited into approved docs after the fact. Retry/DLQ tier is not yet registered on Review's side either (carried to the Event Design Agent per Review's own doc) — provisionally treat it the same as `ReviewSubmitted`. |
+| Inbound (consumed) | Review | `ReviewUpdated` event (new) | **Async** | Fired on an author edit within the 30-day edit window, so Product can adjust `ratingSummary` incrementally instead of re-deriving it from a fresh `ReviewSubmitted` (`kart-review-service/architecture.md`). Now reflected in `kart-product-service/requirement-spec.md` §2/§5 (added at this closure pass — this document's own review of Review's side had flagged it as missing). Retry/DLQ tier is not yet registered on Review's side either (carried to the Event Design Agent per Review's own doc) — provisionally treat it the same as `ReviewSubmitted`. |
 | Outbound (published) | Search, Recommendation, Analytics | `ProductCreated` event | **Async** | BRD §10; Recommendation's consumption confirmed by **ADR-0013** (§5.4/§10 conflict resolved in favor of the Event Catalog); Analytics per **ADR-0004**'s full fan-in default. |
 | Outbound (published) | Search, Wishlist, Offer/Pricing, Analytics | `ProductPriceChanged` event | **Async** | BRD §10/§5.4; publisher corrected to Product by **ADR-0008**; Analytics per **ADR-0004**. Versioned/timestamped payload per edge-cases.md's out-of-order-delivery decision — consumers reject stale versions rather than relying on RabbitMQ ordering. |
 | Outbound (published) | Analytics (confirmed); no other consumer confirmed yet | `ProductUpdated` event | **Async** | requirement-spec §5/§6 item 9 (single-service default, not yet in BRD §10 per ADR-0008's deliberate non-resolution). Analytics auto-consumes per ADR-0004's default; whether Search or another read-side consumer should also subscribe is explicitly carried to the Event Design Agent — not decided here. |
@@ -62,5 +62,5 @@ Requirement-spec §6 carried forward one non-blocking numeric question: how quic
 
 ## Sign-off
 
-- [ ] Reviewed by: _pending human review_
-- [ ] Approved to proceed to DDD Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to DDD Agent

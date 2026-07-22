@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0010: Admin Service's Back-Office Operation Set Is a Closed Enumeration, and Admin Never Owns a Second Copy of Another Service's Domain Data
 
 ## Status
 
-Proposed (final ADR number assigned in a later pipeline pass)
+Accepted
 
 ## Context
 
@@ -45,8 +45,8 @@ This mirrors the exact pattern BRD §24.1 already uses for RBAC itself (one owni
 
 ## Consequences
 
-- `kart-category-service/requirement-spec.md` Open Question #6 and `kart-product-service/requirement-spec.md` Open Question #4 are answered by this ADR: taxonomy curation and product mutation happen through Category's/Product's own write API, invoked by Admin Service as a caller — those services should add an internal-write endpoint (or confirm their existing one accepts the internal service-to-service caller) and cite this ADR once it has a real number, instead of carrying their own question as open.
+- `kart-category-service/requirement-spec.md` Open Question #6 and `kart-product-service/requirement-spec.md` Open Question #4 are answered by this ADR: taxonomy curation and product mutation happen through Category's/Product's own write API, invoked by Admin Service as a caller — those services should add an internal-write endpoint (or confirm their existing one accepts the internal service-to-service caller) and cite this ADR (ADR-0010), instead of carrying their own question as open.
 - `kart-inventory-service/requirement-spec.md` Open Question #5 gains one confirmed candidate trigger (a manual admin action calling into Inventory's own write path) but this ADR does not foreclose Inventory also supporting an automated supplier/warehouse feed as a second trigger — that remains Inventory's own call.
 - Admin Service's own API surface stays exactly `/admin/*` (BRD §5.4) — it gains no new inbound domain-data endpoints. Its outbound calls to Product/Category/Offer/Identity/Inventory are a new, explicit dependency edge that the Architecture Agent must add to the service boundary diagram (BRD §5.5 does not currently draw Admin at all).
 - Admin's own DDD model has exactly one aggregate root of its own consequence — the admin action / permission grant — never a `Product`, `Category`, `Coupon`, or `InventoryStock` aggregate; this bounds the DDD Agent's design instead of leaving it to guess whether Admin needs read/write models for four other services' domains.
-- If any of these four owning services' write APIs turn out not to exist yet in the BRD (true today for Category and Product; Offer's coupon-creation write endpint is likewise unstated), that is that service's own open question to close — this ADR fixes the *integration pattern* (who calls whom), not each callee's own missing endpoint definition.
+- If any of these four owning services' write APIs turn out not to exist yet in the BRD (true today for Category and Product; Offer's coupon-creation write endpoint is likewise unstated), that is that service's own open question to close — this ADR fixes the *integration pattern* (who calls whom), not each callee's own missing endpoint definition.

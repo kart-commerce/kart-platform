@@ -1,0 +1,56 @@
+---
+doc_type: event-contract
+service: kart-product-service
+status: approved
+generated_by: event-design-agent
+source: docs/services/kart-product-service/ddd-model.md, docs/services/kart-product-service/design-decisions.md, docs/services/kart-product-service/architecture.md, docs/services/kart-product-service/database-design.md, docs/services/kart-product-service/api-contract.yaml, docs/services/kart-product-service/edge-cases.md, docs/adr/0013-recommendation-productcreated-consumption.md, docs/adr/0014-review-rating-aggregate-ownership.md, docs/services/kart-search-service/architecture.md, docs/services/kart-wishlist-service/edge-cases.md, docs/services/kart-offer-service/event-contract.md, docs/services/kart-review-service/architecture.md
+---
+
+# Event Contract: kart-product-service
+
+Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared**, including across this event's own multiple different consumer services (design-decisions.md's "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already requires per-consumer-group queues; this contract names the DLQ for each).
+
+## Published Events
+
+| Event | Routing Key | Consumers | Payload (key fields) | Retry | DLQ (per consumer group) | Criticality Justification |
+|---|---|---|---|---|---|---|
+| `ProductCreated` | `product.product.created` | Search, Recommendation, Analytics | `sku`, `attributes` | 3x | `search.product-created.dlq`, `recommendation.product-created.dlq`, `analytics.product-created.dlq` | Standard catalog tier (BRD §10) — see "Retry-Tier Justification" below |
+| `ProductPriceChanged` | `product.price.changed` | Search, Wishlist, Offer, Analytics | `sku`, `oldPrice`, `newPrice`, `occurredAt` | 3x | `search.product-price-changed.dlq`, `wishlist.product-price-changed.dlq`, `offer.product-price-changed.dlq`, `analytics.product-price-changed.dlq` | Standard catalog tier (BRD §10); `occurredAt` added — see "Payload Resolution" below |
+| `ProductUpdated` | `product.product.updated` | Analytics (confirmed); no other consumer confirmed yet | `sku`, `changedFields`, `occurredAt` | 3x | `analytics.product-updated.dlq` | Standard catalog tier, matching its sibling events — see below |
+| `ProductDiscontinued` | `product.product.discontinued` | Search, Analytics | `sku`, `discontinuedAt` | 3x | `search.product-discontinued.dlq`, `analytics.product-discontinued.dlq` | Standard catalog tier — see below |
+
+### Retry-Tier Justification
+
+All four published events sit at the platform's standard catalog tier (3x retry, no on-call paging), not the `Payment*`/money-moving tier — consistent with BRD §10's own stated tier for `ProductCreated`/`ProductPriceChanged` and requirement-spec §3's NFR row ("Looser than the `Payment*` 5x/paged tier — BRD explicitly frames catalog events as tolerating seconds of staleness"). Restated against each event's own actual failure-mode risk, not copied forward unexamined:
+
+- **`ProductCreated`/`ProductPriceChanged`:** a permanently-lost delivery to any one consumer leaves that consumer's own copy stale or (for `ProductCreated`) never indexed — a degraded read experience for that consumer, never a correctness gap this service's own PostgreSQL write side can't recover from (`variants`/`product_groups` remain the durable source of truth regardless of delivery). No consumer treats either event as its own aggregate-creation trigger the way, e.g., `kart-user-service` treats `UserRegistered` — so this doesn't rise to a higher tier.
+- **`ProductUpdated`:** same reasoning, and Analytics is currently the only confirmed consumer — a lost delivery costs a stale non-price catalog field in one reporting projection, the lowest-stakes failure mode of the four.
+- **`ProductDiscontinued`:** a permanently-lost delivery leaves Search still returning a since-discontinued SKU in default results, and leaves Wishlist without the faster event-driven signal — but neither is a silent, unrecoverable failure: Search's own docs already commit to treating this as a soft-remove signal with no other removal path relying on it exclusively, and Wishlist's own edge-cases.md decision explicitly names its periodic reconciliation job as "a second line of defense... even if `ProductDiscontinued` is approved later." Standard tier is sufficient precisely because neither consumer's correctness depends solely on this event's delivery.
+
+### Bulkhead Isolation — Per-Consumer-Group DLQs, Not One Shared `catalog.dlq`
+
+BRD §10's `catalog.dlq` label (restated in requirement-spec §3's NFR table) is the **retry-tier name**, not a literal single physical queue — the same reconciliation `kart-delivery-tracking-service/event-contract.md` and `kart-category-service/event-contract.md` already made for their own BRD-simplified shared DLQ labels, and exactly the topology design-decisions.md's own "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already calls for: one queue and DLQ per consumer group under `ecommerce.events`, so one slow consumer (e.g. Search re-indexing during a bulk catalog load) can never back up or block Recommendation's, Wishlist's, Offer's, or Analytics' own independent consumption of the same event (edge-cases.md "High fan-out on every publish risks one slow consumer blocking others"; BRD §14). The retry **count** (3x) is unchanged from BRD §10 — only the shared queue label is corrected, per consumer group, for every event in this table.
+
+## Payload Resolution
+
+- **`ProductPriceChanged` gains `occurredAt`** (ISO-8601 UTC timestamp), beyond the BRD's original `sku, oldPrice, newPrice`. This is not new invention — it is *structurally required* to implement a decision edge-cases.md and design-decisions.md already locked: "Out-of-order `ProductPriceChanged` delivery under concurrent price edits" chose "version/timestamp on the payload, consumers reject stale versions," and a payload of only `sku, oldPrice, newPrice` gives no such field to compare against. `occurredAt` is used as the ordering key (the event's own origination time, not RabbitMQ receipt order) — matching the platform's already-established pattern for exactly this purpose (`CategoryUpdated`'s `occurredAt`, `kart-category-service/event-contract.md`). Additive-only, backward-compatible per `event-standards.md`'s versioning rule.
+- **`ProductUpdated`'s payload is fixed here for the first time** (requirement-spec §5/§6 item 9 explicitly carried this to this stage): `sku, changedFields, occurredAt`. `changedFields` is an array of the field names that changed (e.g. `["name", "description"]`), not the new values themselves — a consumer needing the current value already has `GET /v1/products/{sku}` (api-contract.yaml) available, and carrying every possible field's new value in the event itself would grow the payload for every consumer regardless of which fields they actually care about. Analytics (the sole confirmed consumer, per architecture.md) only needs to know a non-price catalog field changed and when, for change-frequency reporting — nothing in its own requirement-spec asks for the new values inline.
+- **`ProductDiscontinued`'s payload is fixed here for the first time** (ddd-model.md formalizes the event; requirement-spec/edge-cases proposed it without fixing a schema): `sku, discontinuedAt`. Kept deliberately minimal — Search's own architecture.md describes consuming it purely as a soft-remove signal ("mark the indexed document unavailable... excluded from default query results") and Wishlist's edge-cases.md describes it purely as a staleness/removal trigger for its reconciliation job; neither confirmed consumer's own docs ask for a richer payload than "which SKU, and when."
+
+## Consumed Events
+
+| Event | Routing Key | Publisher | Payload (key fields) | Retry (this service's own consumer queue) | DLQ (this service's own consumer queue) | Notes |
+|---|---|---|---|---|---|---|
+| `ReviewSubmitted` | `review.review.submitted` | `kart-review-service` | `orderId`, `sku`, `rating`, `reviewId`, `userId` | 2x | `product.review-submitted.dlq` | Denormalized `ratingSummary` projection only (ADR-0014) — Review owns the canonical aggregate. Retry count matches Review's own stated publish-side tier (`kart-review-service/architecture.md`: "2x retry, `review.dlq`"). |
+| `ReviewUpdated` | `review.review.updated` | `kart-review-service` | `orderId`, `sku`, `oldRating`, `newRating` | 2x | `product.review-updated.dlq` | New event (requirement-spec §2, added at this closure pass); fired on an author edit within Review's 30-day edit window. Review's own `architecture.md` has not yet formally registered this event's retry/DLQ tier — provisionally treats it the same as `ReviewSubmitted`. This service adopts the identical provisional treatment rather than inventing a different one, pending the Event Design Agent confirming it on Review's own side. |
+
+Both consumed events drive only `product_read_model.ratingSummary`, via a field-scoped partial update (database-design.md) — neither ever touches `price`, `status`, or any catalog field, and neither triggers `ProductUpdated` (a rating change is not a "catalog edit" in the sense that event models).
+
+## Naming-Convention Compliance
+
+All four published events follow the `<Entity><PastTenseVerb>` convention (`event-standards.md`): `ProductCreated`, `ProductPriceChanged`, `ProductUpdated`, `ProductDiscontinued` — all `Product`/`ProductPrice` entity + a past-tense verb (`ddd-model.md` models all four as `Variant`-level events despite the `Product`-prefixed name, matching the BRD's own pre-existing naming for the two BRD-stated events; not renamed to `Variant*` since `ProductCreated`/`ProductPriceChanged` are already-published, BRD-fixed names this stage cannot rename without a breaking change). Routing keys follow `service.entity.action` (`kart-conventions.md`), using `product` as this service's own domain word — consistent with `kart-offer-service/event-contract.md`'s own already-cited consumption of `ProductPriceChanged` at routing key `product.price.changed`, matched here exactly rather than re-decided. No collision found against any event name already registered in this repo's other `event-contract.md` files (`kart-offer-service`, `kart-admin-service`, `kart-cart-service`, `kart-category-service`, `kart-analytics-service`, `kart-delivery-tracking-service`).
+
+## Sign-off
+
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved
