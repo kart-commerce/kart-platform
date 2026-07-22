@@ -2,7 +2,16 @@
 # service: kart-offer-service
 # status: approved (no prior published contract to break — first issue)
 # generated_by: api-design-agent
-# source: docs/services/kart-offer-service/ddd-model.md
+# source: docs/services/kart-offer-service/ddd-model.md, docs/services/kart-offer-service/design-decisions.md,
+#   docs/services/kart-offer-service/database-design.md, docs/adr/0010-admin-service-scope-and-integration.md,
+#   docs/adr/0019-admin-promotion-campaign-management-category.md, docs/services/kart-admin-service/design-decisions.md
+#
+# This pass adds the six admin-only endpoints requirement-spec.md §2/§5/§6 item 6 named but this
+# contract had never actually specified (design-decisions.md flagged this explicitly as "api-contract.yaml
+# does not yet include these four endpoints at all... a carried-forward implementation gap"). Four
+# write endpoints (issue/deactivate Coupon, create/deactivate PromotionCampaign) plus two admin-read
+# endpoints needed so a caller can obtain the `version` an `If-Match` deactivate call requires
+# (kart-admin-service/design-decisions.md's "Concurrency Control for Back-Office Writes").
 #
 # Publishing a stable copy to kart-shared is deferred until that repo
 # exists in this pipeline's scope.
@@ -12,8 +21,19 @@ info:
   title: kart-offer-service API
   version: 1.0.0
   description: >
-    Coupon validation/redemption, pricing quotes, and active promotions.
-    Merge of BRD Coupon/Pricing/Promotion services per ADR-0001.
+    Coupon validation/redemption, pricing quotes, and active promotions — plus internal,
+    admin-only coupon-issuance/promotion-campaign-management write endpoints (ADR-0010,
+    ADR-0019). Merge of BRD Coupon/Pricing/Promotion services per ADR-0001.
+
+servers:
+  - url: https://api.kart.example/offer
+    description: >
+      Public API Gateway. Serves the checkout read path only — `/v1/coupons/validate`,
+      `/v1/coupons/redeem`, `/v1/pricing/quote`, `/v1/promotions/active`.
+  - url: https://internal.kart.local/offer
+    description: >
+      Internal network segment. Serves every admin-only endpoint below — reachable by Admin
+      Service's client-credentials service principal only (ADR-0010; ADR-0019).
 
 paths:
   /v1/coupons/validate:
@@ -122,8 +142,287 @@ paths:
                     campaignId: { type: string }
                     window: { type: object, properties: { startsAt: { type: string, format: date-time }, endsAt: { type: string, format: date-time } } }
 
+  /v1/coupons:
+    post:
+      operationId: issueCoupon
+      summary: Issue (create) a new coupon. Internal, admin-only.
+      description: >
+        requirement-spec §2/§5/§6 item 6 (was Open Question #6, resolved) — not a BRD-stated
+        endpoint. Called by Admin Service only, per ADR-0010's "Coupon issuance" category
+        (Admin invokes Offer's own write API synchronously; Admin never holds a duplicate
+        `Coupon` copy). Publishes `CouponIssued` on success (ddd-model.md).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            design-decisions.md's "Idempotency Mechanism for Admin-Invoked Coupon/Promotion
+            Write Endpoints" — dedup is served by `couponCode`'s own PRIMARY KEY constraint
+            (database-design.md), the same conflict-to-idempotent-response pattern
+            `/v1/coupons/redeem` already uses; no separate idempotency-ledger table.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [couponCode, validFrom, validUntil]
+              properties:
+                couponCode: { type: string, description: "Caller-supplied; must be globally unique (database-design.md PRIMARY KEY)." }
+                perUserCap: { type: integer, nullable: true, description: "RedemptionLimit.perUserCap, independently optional (ddd-model.md Modeling Decision #1)." }
+                globalCap: { type: integer, nullable: true, description: "RedemptionLimit.globalCap, independently optional." }
+                validFrom: { type: string, format: date-time }
+                validUntil: { type: string, format: date-time }
+      responses:
+        '201':
+          description: Coupon issued; `CouponIssued` published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CouponAdminView' }
+        '409':
+          description: "`couponCode` already exists — no row written, no event published."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/coupons/{couponCode}:
+    get:
+      operationId: getCouponAdminView
+      summary: Read a coupon's current admin-facing state, including its optimistic-concurrency version. Internal, admin-only.
+      description: >
+        Added so a caller can obtain the current `version` before submitting
+        `POST /v1/coupons/{couponCode}/deactivate`'s `If-Match` precondition
+        (kart-admin-service/design-decisions.md's "Concurrency Control for Back-Office Writes").
+        Not a BRD-stated endpoint; a same-shape internal read as Product's own admin-facing
+        write-side endpoints.
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: couponCode
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CouponAdminView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/coupons/{couponCode}/deactivate:
+    post:
+      operationId: deactivateCoupon
+      summary: Deactivate a coupon ahead of its natural validity-window end. Internal, admin-only.
+      description: >
+        requirement-spec §2/§5/§6 item 6. Modeled as early-truncating `validUntil` to `now()`
+        (never later than the existing value — ddd-model.md Modeling Decision #4), never a
+        separate status flag; never retroactively invalidates a redemption that already
+        completed (requirement-spec §4 Domain Invariant). Publishes `CouponDeactivated`
+        only on this explicit call, never on natural window expiry.
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: couponCode
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: integer }
+          description: >
+            The `version` last read via `GET /v1/coupons/{couponCode}`
+            (kart-admin-service/design-decisions.md's optimistic-concurrency expectation).
+      responses:
+        '200':
+          description: Deactivated (or already deactivated/expired — idempotent); `CouponDeactivated` published only if this call is what actually truncated the window.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CouponAdminView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '412':
+          description: "`If-Match` version is stale (database-design.md's conditional `UPDATE ... WHERE version = $2` affected zero rows) — re-read via `GET /v1/coupons/{couponCode}` and retry."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/promotions:
+    post:
+      operationId: createPromotionCampaign
+      summary: Create (and activate) a promotion campaign. Internal, admin-only.
+      description: >
+        requirement-spec §2/§5/§6 item 6. Called by Admin Service only, per **ADR-0019**'s
+        "Promotion campaign management" category (extends ADR-0010's closed enumeration).
+        Publishes `PromotionActivated` on success (ddd-model.md — this is the same "campaign
+        goes live" signal BRD §5.4 already names, not a new event).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            `campaignId` is server-generated (unlike `couponCode`), so dedup on a literal
+            retry requires the client to not resubmit past a successful `201` — the natural-key
+            conflict pattern `/v1/coupons` relies on does not apply here the same way
+            (database-design.md's "Admin Write-Path Mechanics").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startsAt, endsAt, discountRule]
+              properties:
+                startsAt: { type: string, format: date-time }
+                endsAt: { type: string, format: date-time }
+                discountRule:
+                  type: object
+                  additionalProperties: true
+                  description: "DiscountRule value object (ddd-model.md) — shape varies by campaign type (database-design.md `discount_rule JSONB`)."
+      responses:
+        '201':
+          description: Campaign created and activated; `PromotionActivated` published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromotionCampaignAdminView' }
+        '403':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/promotions/{campaignId}:
+    get:
+      operationId: getPromotionCampaignAdminView
+      summary: Read a campaign's current admin-facing state, including its optimistic-concurrency version. Internal, admin-only.
+      description: Same purpose as `GET /v1/coupons/{couponCode}` above, for the symmetric `PromotionCampaign` deactivate flow.
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromotionCampaignAdminView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/promotions/{campaignId}/deactivate:
+    post:
+      operationId: deactivatePromotionCampaign
+      summary: Deactivate a campaign ahead of its natural window end. Internal, admin-only.
+      description: >
+        requirement-spec §2/§5/§6 item 6. Modeled as early-truncating `endsAt` to `now()`
+        (never later than the existing value — ddd-model.md Modeling Decision #4); never
+        retroactively invalidates a `PricingQuote` already issued (requirement-spec §4 Domain
+        Invariant). Publishes `PromotionDeactivated` only on this explicit call, never on
+        natural window expiry.
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: campaignId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: integer }
+          description: The `version` last read via `GET /v1/promotions/{campaignId}`.
+      responses:
+        '200':
+          description: Deactivated (or already deactivated/expired — idempotent); `PromotionDeactivated` published only if this call is what actually truncated the window.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromotionCampaignAdminView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '412':
+          description: "`If-Match` version is stale — re-read via `GET /v1/promotions/{campaignId}` and retry."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
 components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            admin: "Admin-scoped service principal (Admin Service calling Offer's write API, per ADR-0010/ADR-0019) — Identity-issued, never validated locally"
+
   schemas:
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    CouponAdminView:
+      type: object
+      required: [couponCode, validFrom, validUntil, totalRedemptions, version]
+      properties:
+        couponCode: { type: string }
+        perUserCap: { type: integer, nullable: true }
+        globalCap: { type: integer, nullable: true }
+        validFrom: { type: string, format: date-time }
+        validUntil: { type: string, format: date-time }
+        totalRedemptions: { type: integer }
+        version: { type: integer, description: "Optimistic-concurrency token — pass back as `If-Match` on deactivate (database-design.md)." }
+
+    PromotionCampaignAdminView:
+      type: object
+      required: [campaignId, startsAt, endsAt, discountRule, version]
+      properties:
+        campaignId: { type: string, format: uuid }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        discountRule: { type: object, additionalProperties: true }
+        version: { type: integer, description: "Optimistic-concurrency token — pass back as `If-Match` on deactivate." }
+
     Money:
       type: object
       required: [amount, currency]

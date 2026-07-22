@@ -1,9 +1,9 @@
 ---
 doc_type: design-decisions
 service: kart-offer-service
-status: pending-approval
+status: approved
 generated_by: design-decision-agent
-source: docs/services/kart-offer-service/requirement-spec.md, docs/services/kart-offer-service/edge-cases.md
+source: docs/services/kart-offer-service/requirement-spec.md, docs/services/kart-offer-service/edge-cases.md, docs/services/kart-offer-service/database-design.md, docs/services/kart-offer-service/api-contract.yaml, docs/adr/0019-admin-promotion-campaign-management-category.md
 ---
 
 # Design Decisions: kart-offer-service
@@ -71,18 +71,18 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
 - **Decision:**
   - Chosen: Require `Idempotency-Key`, consistent with the pattern `api-contract.yaml` already applies to `/v1/coupons/redeem` within this service, and with kart-admin-service/design-decisions.md's own already-fixed commitment to forward such a key on every retry of its outbound calls to owning services (Offer included).
   - Why: a retried admin creation/deactivation call under transient network failure should surface as an idempotent no-op, not a raw primary-key-conflict error to the calling admin operator; keeps Offer's write-API idempotency story uniform across all of its write endpoints instead of ad hoc per-endpoint.
-  - Trade-off accepted: this decision is grounded in cross-service consistency with Admin's own already-stated expectation, not a requirement Offer's own spec states outright for these four endpoints specifically — final header/response shape remains the API Design Agent's job, as requirement-spec.md itself frames it ("final request/response shape is the API Design Agent's job"); note `api-contract.yaml` does not yet include these four endpoints at all, so wiring this in is a carried-forward implementation gap, not something closed by this or any other already-approved doc.
+  - Trade-off accepted: this decision is grounded in cross-service consistency with Admin's own already-stated expectation, not a requirement Offer's own spec states outright for these four endpoints specifically. **Since resolved:** `api-contract.yaml` now specifies all four endpoints (plus two admin-read endpoints so a caller can obtain the `version` an `If-Match` precondition needs) with `Idempotency-Key` wired in exactly as described here — no longer a carried-forward gap.
 
 ## Not Decided Here
 
 - **Serialization format for events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`event-standards.md`); no divergence reason exists, so nothing to add here.
 - **Circuit breaker / bulkhead resilience patterns on outbound calls** — architecture.md states plainly that Offer "has no synchronous outbound dependency on any other service": all three synchronous inbound calls originate from the client-facing gateway/checkout flow, and both event dependencies (Product, Order) are async and non-blocking. There is no outbound call to wrap a breaker around, unlike Order/Payment/Admin's outbound-heavy profiles — revisit only if Offer gains a genuine synchronous outbound dependency.
-- **Optimistic concurrency (version/ETag) for two admin operators concurrently editing the same `Coupon`/`PromotionCampaign` record** — kart-admin-service/design-decisions.md's "Concurrency Control for Back-Office Writes" decision assumes a version/ETag `If-Match` precondition on every owning service's write API it calls, Offer included, but that same doc explicitly flags this as "carried forward as a cross-service API contract expectation... not decided here" on the owning-service side. Offer's own requirement-spec/edge-cases raise no such scenario (only redemption-vs-deactivation races, covered above under Concurrency Control for the Coupon Aggregate), so nothing is invented here — a genuine open item for whichever doc next revisits Offer's admin-write endpoints, not a silent gap.
+- **Optimistic concurrency (version/ETag) for two admin operators concurrently editing the same `Coupon`/`PromotionCampaign` record — since resolved.** Was flagged here as "a genuine open item for whichever doc next revisits Offer's admin-write endpoints." That revisit happened this pass: `database-design.md`'s "Admin Write-Path Mechanics" adds a `version` column to both `coupons` and `promotion_campaigns`, and `api-contract.yaml`'s deactivate endpoints require an `If-Match: <version>` header, satisfying `kart-admin-service/design-decisions.md`'s cross-service expectation directly.
 - **`PriceQuoteIssued`/`PromotionActivated`/`PromotionDeactivated` confirmed consumer (requirement-spec Q5)** — already fully resolved (Analytics is the sole confirmed consumer; all three published for audit/analytics/future-extension use, no other confirmed consumer today) across requirement-spec.md §6.5, architecture.md, ddd-model.md, and event-contract.md. No design-pattern choice remains open here; the Communication Style and Retry/DLQ decisions above are already written consistent with that resolution, not contingent on it changing.
 - **Aggregate boundaries, the three-aggregate model, and concrete schema/table shapes** — already decided (ddd-model.md, database-design.md); this stage does not re-decide them, only supplies the technology/pattern layer they already assume.
 
 ## Sign-off
 
-- [ ] Reviewed by: _pending human reviewer_
-- [ ] Technology/pattern choices approved
-- [ ] Approved to proceed to Architecture Agent (informational here — architecture.md for this service is already approved; this gate documents that this stage's own catalogue has been reviewed, not that Architecture is re-run)
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Technology/pattern choices approved
+- [x] Approved to proceed to Architecture Agent (informational here — architecture.md for this service is already approved; this gate documents that this stage's own catalogue has been reviewed, not that Architecture is re-run)

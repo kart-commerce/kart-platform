@@ -3,7 +3,7 @@ doc_type: database-design
 service: kart-offer-service
 status: approved
 generated_by: database-design-agent
-source: docs/services/kart-offer-service/ddd-model.md
+source: docs/services/kart-offer-service/ddd-model.md, docs/services/kart-offer-service/design-decisions.md, docs/services/kart-offer-service/api-contract.yaml, docs/services/kart-admin-service/design-decisions.md
 ---
 
 # Database Design: kart-offer-service
@@ -20,7 +20,8 @@ CREATE TABLE coupons (
     global_cap          INT NULL,           -- RedemptionLimit.globalCap
     valid_from           TIMESTAMPTZ NOT NULL,
     valid_until          TIMESTAMPTZ NOT NULL,
-    total_redemptions    INT NOT NULL DEFAULT 0
+    total_redemptions    INT NOT NULL DEFAULT 0,
+    version              INT NOT NULL DEFAULT 1   -- optimistic-concurrency token for admin writes (see "Admin Write-Path Mechanics" below); incremented only on deactivation, since issuance is a single INSERT and no full-edit endpoint exists
 );
 
 CREATE TABLE coupon_redemptions (
@@ -50,11 +51,37 @@ CREATE TABLE promotion_campaigns (
     campaign_id     UUID PRIMARY KEY,
     starts_at       TIMESTAMPTZ NOT NULL,
     ends_at         TIMESTAMPTZ NOT NULL,
-    discount_rule   JSONB NOT NULL          -- DiscountRule value object, shape varies by campaign type
+    discount_rule   JSONB NOT NULL,         -- DiscountRule value object, shape varies by campaign type
+    version         INT NOT NULL DEFAULT 1  -- optimistic-concurrency token for admin writes, same mechanism as coupons.version below
 );
 
 CREATE INDEX idx_promotion_campaigns_window ON promotion_campaigns (starts_at, ends_at);
 ```
+
+## Admin Write-Path Mechanics (implements ddd-model.md's Modeling Decision #4, doesn't re-derive it)
+
+Fills the mechanism gap `design-decisions.md`'s "Idempotency Mechanism for Admin-Invoked Coupon/Promotion Write Endpoints" decision and `kart-admin-service/design-decisions.md`'s "Concurrency Control for Back-Office Writes" decision both require, now that these endpoints are actually specified (`api-contract.yaml`):
+
+- **Issuance (`POST /v1/coupons`, `POST /v1/promotions`)** — a plain `INSERT`. Idempotency under a client-supplied `Idempotency-Key` retry is served by the row's own natural unique key: `coupon_code` is caller-supplied and PK-constrained, so a retried `POST /v1/coupons` with the same code hits the same conflict-to-idempotent-response translation already established for `/v1/coupons/redeem`'s `(coupon_code, order_id)` constraint (edge-cases.md "Double-redemption for the same order"). `campaign_id` is server-generated per request, so a `POST /v1/promotions` retry is only naturally idempotent if the client reuses a previously-returned `campaign_id` on retry — out of scope to enforce server-side beyond the `Idempotency-Key` header contract itself (no separate idempotency-ledger table is introduced; this mirrors how `/v1/coupons/redeem` itself has never had one either).
+- **Deactivation (`POST /v1/coupons/{couponCode}/deactivate`, `POST /v1/promotions/{campaignId}/deactivate`)** — one atomic conditional `UPDATE`, combining the window-truncation mechanism (ddd-model.md Modeling Decision #4) with the `If-Match`/version precondition `kart-admin-service/design-decisions.md` requires of every owning service's write API it calls:
+
+```sql
+UPDATE coupons
+SET valid_until = LEAST(valid_until, now()), version = version + 1
+WHERE coupon_code = $1 AND version = $2;
+-- 0 rows affected → 412 Precondition Failed (stale version) or 404 (unknown code) —
+-- api-contract.yaml distinguishes the two by checking existence first, since the same
+-- zero-rows-updated result covers both. LEAST() guarantees a deactivation request against
+-- an already-naturally-expired coupon is a no-op, never an accidental extension.
+
+UPDATE promotion_campaigns
+SET ends_at = LEAST(ends_at, now()), version = version + 1
+WHERE campaign_id = $1 AND version = $2;
+-- Identical mechanism and failure-mode handling as coupons above.
+```
+
+- **Reading the current `version` before a deactivate call** — `api-contract.yaml`'s new `GET /v1/coupons/{couponCode}` / `GET /v1/promotions/{campaignId}` admin-read endpoints return `version` in their response body for exactly this purpose (an admin operator/Admin Service reads current state, then submits `If-Match: <version>` on the deactivate call) — the same read-then-conditional-write flow `kart-admin-service/design-decisions.md` already assumes exists on every owning service it calls.
+- **Why a version column, not a full audit/history table:** neither `Coupon` nor `PromotionCampaign` has a general-purpose field-level edit endpoint (only issuance and deactivation) — a single incrementing integer is sufficient to detect "did someone else already act on this record since I read it," the identical minimal mechanism `kart-admin-service/design-decisions.md`'s own row-version choice for `admin_permission_grants` uses, not a new pattern invented here.
 
 ## Indexing Rationale
 
@@ -70,5 +97,5 @@ Not needed at current scale. The BRD's capacity plan (§4.3) doesn't call out Co
 
 ## Sign-off
 
-- [x] Reviewed by: kakon-mehedi
+- [x] Reviewed by: kakon-mehedi — re-reviewed this pass for the `version` column addition (additive, non-breaking; supports the now-specified admin write endpoints) and the "Admin Write-Path Mechanics" section
 - [x] Approved (write-model schema)
