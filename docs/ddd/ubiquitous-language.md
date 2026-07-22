@@ -88,6 +88,21 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 |---|---|---|
 | Admin (fine-grained permission grant) | kart-admin-service | Identity resolves only the coarse `Admin` `RoleGrant`; Admin Service owns and consults the separate, narrower `admin_permission_grants` table for which back-office categories an `Admin`-role holder can exercise (ADR-0010) |
 
+## Owned by `kart-category-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Category | A taxonomy node (id, name, parent, hierarchy position, status); the smallest, least-contended bounded context on the platform — max depth 4, materialized-path storage | Aggregate root |
+| CategoryId | The stable identifier issued by Category for a taxonomy node; never reassigned or reused, since it is the shard key `kart-product-service`/`kart-search-service` use downstream | Value object |
+| AncestorPath | The ordered root-to-immediate-parent chain of `CategoryId`s for a `Category`, making ancestor/cycle checks an index lookup rather than a recursive walk | Value object |
+| CategoryStatus | The `Active`/`Deprecated` lifecycle state of a `Category`; deprecation is the only removal path, `CategoryId` is never physically deleted | Value object |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-category-service` uses it |
+|---|---|---|
+| Admin (RBAC-gated write caller) | kart-identity-service / kart-admin-service | Category's write endpoints trust the Identity-issued `Admin` role claim (BRD §24.1) and are called by Admin Service as an orchestration-layer client (ADR-0010); Category never models Admin's own fine-grained permission grants |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |

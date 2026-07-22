@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0011: Category Is Served Directly from PostgreSQL — No Separate MongoDB Read Model
 
 ## Status
 
-Proposed (final ADR number assigned in a later pipeline pass)
+Accepted
 
 ## Context
 
