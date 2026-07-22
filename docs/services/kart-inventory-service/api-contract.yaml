@@ -1,0 +1,246 @@
+# doc_type: api-contract
+# service: kart-inventory-service
+# status: approved
+# generated_by: api-design-agent
+# source: docs/services/kart-inventory-service/requirement-spec.md,
+#         docs/services/kart-inventory-service/edge-cases.md,
+#         docs/services/kart-inventory-service/design-decisions.md,
+#         docs/services/kart-inventory-service/architecture.md,
+#         docs/services/kart-inventory-service/ddd-model.md
+#
+# No breaking-change risk: first issue of this contract, nothing published
+# to a shared-contracts repo yet.
+#
+# Money-adjacent Idempotency-Key rule (api-standards.md): reserve/release are
+# not money-moving themselves, but requirement-spec.md's release-idempotency
+# Domain Invariant requires the same effect — see reservationId's role below,
+# which serves as the idempotency key for release the same way a client
+# Idempotency-Key header would for a payment endpoint.
+#
+# This contract has two surfaces: a public/gateway-reachable REST API
+# (reserve, release, read) and one internal gRPC service consumed only by
+# Cart's checkout-time validation call (kart-cart-service/design-decisions.md,
+# "Resilience Pattern for Checkout-Time Stock/Price Validation" — resolved on
+# this service's side in architecture.md's "API Surface Consistency Note").
+
+openapi: 3.0.3
+info:
+  title: kart-inventory-service API
+  version: 1.0.0
+  description: >
+    Stock truth per warehouse/SKU, synchronous reservation holds with TTL,
+    and oversell prevention via row-level pessimistic locking (BRD §5.2,
+    §6.1). The platform's highest-contention service (PLATFORM_BLUEPRINT.md).
+
+servers:
+  - url: /v1
+
+paths:
+  /inventory/reserve:
+    post:
+      operationId: reserveStock
+      summary: Reserve stock for an order line item (synchronous saga step 1).
+      description: >
+        Called synchronously by Order as the first Order Saga step (BRD
+        §12.1; ADR-0009 confirms this is genuine synchronous RPC, not an
+        async hop). Locks the target SKU's warehouse stock row(s)
+        (SELECT ... FOR UPDATE), attempting single-warehouse-first
+        satisfaction, falling back to a multi-warehouse split only if no
+        single warehouse can fully satisfy the line (requirement-spec.md
+        Decision 3; ddd-model.md's Reservation/WarehouseAllocation shape).
+        On success, publishes InventoryReserved after durable commit; on
+        insufficient stock, publishes InventoryReservationFailed and
+        returns 409 — there is no backorder path (requirement-spec.md
+        Decision 4). A bounded lock_timeout (design-decisions.md,
+        "Resilience Budget") returns 503 rather than queuing indefinitely
+        on a hot SKU.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, sku, qty]
+              properties:
+                orderId: { type: string, format: uuid }
+                sku: { type: string }
+                qty: { type: integer, minimum: 1 }
+      responses:
+        '201':
+          description: Reservation created; InventoryReserved published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '409':
+          description: >
+            Insufficient stock across all candidate warehouses;
+            InventoryReservationFailed published. No backorder/waitlist
+            path exists (requirement-spec.md Decision 4).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: >
+            Lock-wait timeout on a hot SKU (design-decisions.md, "Resilience
+            Budget") — retryable, distinct from a genuine 409 oversell
+            failure.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /inventory/release:
+    post:
+      operationId: releaseReservation
+      summary: Release a held reservation (explicit call or saga compensation).
+      description: >
+        Idempotent, keyed on reservationId (ddd-model.md's ReservationStatus
+        terminal-state machine) — a release against an already-Released or
+        already-Expired reservation is a no-op that still returns 200 and
+        does not re-publish InventoryReleased (requirement-spec.md §4;
+        edge-cases.md, "Compensating-transaction rollback correctness").
+        Reachable via this endpoint, by consuming OrderCancelled, by
+        consuming OrderCompensationTriggered, or by the internal TTL sweep —
+        all four converge on this same state-checked write path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reservationId]
+              properties:
+                reservationId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            Released (or already-terminal, idempotent no-op).
+            InventoryReleased published on the transition; not republished
+            if already terminal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '404':
+          description: reservationId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /inventory/{sku}:
+    get:
+      operationId: getStockLevel
+      summary: Current available stock level for a SKU (public read path).
+      description: >
+        Informational display read, not a source of truth for any
+        allocation decision — reservation/release/replenishment always take
+        a fresh SELECT ... FOR UPDATE regardless of this endpoint's cache
+        state (design-decisions.md, "Read-Path Caching Strategy"). Backed
+        by a short-TTL Redis cache-aside; a cache miss falls back to a
+        PostgreSQL read replica.
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+        - name: warehouseId
+          in: query
+          required: false
+          schema: { type: string }
+          description: Omit for platform-wide available quantity summed across warehouses.
+      responses:
+        '200':
+          description: Stock level.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockLevel' }
+        '404':
+          description: sku not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  schemas:
+    Reservation:
+      type: object
+      required: [reservationId, orderId, sku, qty, status, allocations]
+      properties:
+        reservationId: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        sku: { type: string }
+        qty: { type: integer }
+        status:
+          type: string
+          enum: [reserved, released, expired]
+        allocations:
+          type: array
+          description: One entry per warehouse this reservation drew from (ddd-model.md's WarehouseAllocation) — usually one, more than one only on the multi-warehouse fallback.
+          items:
+            type: object
+            properties:
+              warehouseId: { type: string }
+              qty: { type: integer }
+        expiresAt:
+          type: string
+          format: date-time
+          description: Creation time + 15-minute TTL (requirement-spec.md Decision 2).
+
+    StockLevel:
+      type: object
+      required: [sku, availableQty]
+      properties:
+        sku: { type: string }
+        warehouseId:
+          type: string
+          nullable: true
+          description: Present only when the request scoped to one warehouse.
+        availableQty: { type: integer }
+
+    Problem:
+      type: object
+      description: RFC 7807-style problem details.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: insufficient_stock
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+# =============================================================================
+# Internal gRPC surface — InventoryAvailabilityService
+#
+# Consumed only by kart-cart-service's checkout-time lazy validation call
+# (kart-cart-service/design-decisions.md, "Resilience Pattern for
+# Checkout-Time Stock/Price Validation" — timeout-guarded, circuit-breaker
+# wrapped, fails open on Cart's side). Read-only: never reserves, never
+# takes a write lock, reads through the same short-TTL cache-aside path as
+# GET /inventory/{sku} above — this is a second protocol for the same read
+# concern, not a second source of truth (architecture.md's "API Surface
+# Consistency Note — Resolved"). Reserved for this exact shape per
+# agent-reusables/docs/standards/api-standards.md's own illustrative
+# example ("internal, high-throughput synchronous calls... e.g. an
+# inventory reserve check").
+#
+# proto3 service definition (documented here; not a separate .proto file
+# in this pipeline's current scope):
+#
+#   service InventoryAvailabilityService {
+#     rpc CheckAvailability(CheckAvailabilityRequest) returns (CheckAvailabilityResponse);
+#   }
+#
+#   message CheckAvailabilityRequest {
+#     string sku = 1;
+#     int32 requested_qty = 2;
+#   }
+#
+#   message CheckAvailabilityResponse {
+#     string sku = 1;
+#     int32 available_qty = 2;
+#     bool sufficient = 3;  // available_qty >= requested_qty at read time —
+#                           // advisory only, re-checked authoritatively by
+#                           // POST /inventory/reserve's own lock at checkout
+# }
+# =============================================================================

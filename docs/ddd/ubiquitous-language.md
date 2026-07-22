@@ -103,6 +103,21 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 |---|---|---|
 | Admin (RBAC-gated write caller) | kart-identity-service / kart-admin-service | Category's write endpoints trust the Identity-issued `Admin` role claim (BRD §24.1) and are called by Admin Service as an orchestration-layer client (ADR-0010); Category never models Admin's own fine-grained permission grants |
 
+## Owned by `kart-inventory-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| WarehouseStock | The per-`(warehouseId, sku)` stock row every reservation/release/replenishment write locks via `SELECT ... FOR UPDATE`; the oversell-prevention boundary — the platform's highest-contention aggregate | Aggregate root |
+| Reservation | The hold created by a stock reserve call, correlated 1:1 with one order line-item request; TTL-bounded (15 min) and idempotently released via a terminal-state machine | Aggregate root |
+| WarehouseAllocation | One `(warehouseId, qty)` pair within a `Reservation`; more than one only on the multi-warehouse fallback (no single warehouse could fully satisfy the line) | Entity |
+| ReservationStatus | The `Reserved`/`Released`/`Expired` terminal-state machine a `Reservation` moves through; once terminal, further release attempts are idempotent no-ops | Value object |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-inventory-service` uses it |
+|---|---|---|
+| Order (`orderId`) | kart-order-service | `Reservation.orderId` is a reference only; Inventory never models Order's own Saga/state machine, it only reacts to `OrderCancelled`/`OrderCompensationTriggered` |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |

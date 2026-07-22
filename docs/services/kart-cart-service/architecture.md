@@ -37,7 +37,7 @@ Cart has exactly one synchronous *outbound* dependency (the checkout-time Produc
 
 The remaining edges are async and one-directional in effect (Cart consumes `InventoryReservationFailed`, Cart publishes `CartCheckedOut` to Analytics only) — none of these create a synchronous chain. In particular, Cart is **not** wired into the Order Saga at all (BRD §12), so there is no risk of a chatty Cart↔Order coupling that should have been async: there is no Cart↔Order coupling of any kind at the service-boundary level.
 
-One item worth flagging forward to the API Design Agent for Product/Inventory: today their only documented public surface is REST (`GET /products/{id}`, `GET /inventory/{sku}`) — the gRPC channel `design-decisions.md` calls for on Cart's side implies Product and/or Inventory must also expose an internal gRPC endpoint for this validation call. This is a downstream contract-sizing detail, not a boundary-level gap; Cart's own boundary and dependency direction are unaffected either way.
+**Resolved on Inventory's side:** `kart-inventory-service/architecture.md` and `api-contract.yaml` now define `InventoryAvailabilityService.CheckAvailability`, a minimal read-only gRPC RPC distinct from the public `GET /inventory/{sku}` REST endpoint — the gRPC channel this service's own `design-decisions.md` calls for. Product's own equivalent endpoint remains a downstream contract-sizing detail for whenever Product's Architecture/API Design stages run; Cart's own boundary and dependency direction are unaffected either way.
 
 ## Sign-off
 

@@ -1,9 +1,9 @@
 ---
 doc_type: architecture
 service: kart-inventory-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
-source: docs/services/kart-inventory-service/requirement-spec.md
+source: docs/services/kart-inventory-service/requirement-spec.md, docs/services/kart-inventory-service/edge-cases.md, docs/services/kart-inventory-service/design-decisions.md, docs/services/kart-inventory-service/ddd-model.md
 ---
 
 # Architecture: kart-inventory-service
@@ -26,7 +26,7 @@ Unlike `kart-offer-service`, Inventory is a **mandatory, blocking participant in
 | Inbound (consumed) | Order | `OrderCompensationTriggered` event | **Async** | Saga compensation trigger (BRD §12.2); Event Catalog row added per ADR-0007 (consumers: Inventory, Notification, Analytics; 3x retry, `order.dlq`). Same idempotent release path as the two triggers above. |
 | Inbound | Client (via API Gateway) | `GET /inventory/{sku}` | **Sync** (REST, read) | Stock-level read (BRD §5.2). The BRD does not name a specific caller for this endpoint — it is reachable via the gateway by any consumer needing display-time stock data; requirement-spec's read-path NFR (P95 < 150ms) and design-decisions.md's short-TTL cache-aside apply regardless of caller. |
 | Inbound | Recommendation | `GET /inventory/{sku}` | **Sync** (REST, read) | Newly resolved by `kart-recommendation-service/architecture.md`: a request-time live-stock filter on candidate items, timeout-guarded and required to degrade gracefully (serve unfiltered/last-known-good) rather than fail Recommendation's own request on an Inventory timeout/error — the fail-open contract lives entirely on Recommendation's side, not this service's. Reuses the same read endpoint and cache-aside path as the client-facing read above; no new endpoint needed on Inventory's side for this edge. |
-| Inbound | Cart | Lazy stock/price validation call | **Sync** (internal gRPC), best-effort, **fails open on Cart's side** | Checkout-time-only pre-check, resolved by `kart-cart-service/architecture.md`/`design-decisions.md` — deliberately *not* the same mechanism as the two REST rows above. See the API Surface Consistency Note below: this is a distinct, not-yet-formalized internal surface on Inventory's side, carried forward to the API Design Agent, not a contradiction of this service's own REST-only reserve/release decision. |
+| Inbound | Cart | `InventoryAvailabilityService.CheckAvailability` (gRPC) | **Sync** (internal gRPC), best-effort, **fails open on Cart's side** | Checkout-time-only pre-check, resolved by `kart-cart-service/architecture.md`/`design-decisions.md` — a distinct internal gRPC surface from the two REST rows above, now formalized in `api-contract.yaml` (see resolved API Surface Consistency Note below). |
 | Inbound | Admin | Inventory's own replenishment write path (manual trigger) | **Sync** (REST, internal client-credentials call) | Added here per `kart-admin-service/architecture.md`'s explicit follow-up flag (that doc's Dependencies §, "Outbound → Inventory" row), which named this exact edge and asked whichever service reaches its own Architecture Agent pass next to add the corresponding inbound-from-Admin edge for consistency. Confirms requirement-spec Decision 5: manual admin-initiated replenishment goes through the identical write path as the threshold-triggered automated reorder — Inventory itself publishes `InventoryReplenished` as a result; Admin never publishes that event itself. This is a control-plane, low-frequency call, not a hot-path dependency. |
 | Outbound (published) | Order | `InventoryReserved` (orderId, sku, qty) | **Async** | Saga-advancement confirmation, published only after the stock-row lock and reservation write are durably committed (Outbox pattern; requirement-spec §4 Domain Invariants) — the synchronous reserve call's HTTP response is a separate signal from this event's eventual delivery (design-decisions.md's Outbox decision). |
 | Outbound (published) | Order, Cart | `InventoryReservationFailed` (orderId, sku) | **Async** | Order: triggers saga compensation (BRD §12.2). Cart: co-consumer (BRD §10) for cart-level customer feedback on a now-unavailable item; `kart-cart-service`'s own requirement-spec confirms this exact consumption. |
@@ -35,9 +35,9 @@ Unlike `kart-offer-service`, Inventory is a **mandatory, blocking participant in
 
 No other synchronous or asynchronous edge exists in the requirement-spec or edge-cases.md for this service. In particular: `InventoryReserved`/`InventoryReservationFailed`/`InventoryReleased` payloads carry no warehouse field, so the multi-warehouse allocation strategy (requirement-spec Decision 3) is entirely internal to this service's own reservation transaction and never crosses this boundary.
 
-### API Surface Consistency Note (carried forward, non-blocking)
+### API Surface Consistency Note — Resolved
 
-This service's own `design-decisions.md` already resolved reserve/release as synchronous REST/HTTP, matching the BRD's concrete endpoint shapes and diverging deliberately from the reusable API standards' generic gRPC example. That decision was scoped to `/inventory/reserve`/`/inventory/release` only — it says nothing about the read side. Two peers now reach Inventory's read path by two different mechanisms: Recommendation calls the existing public `GET /inventory/{sku}` REST endpoint directly (`kart-recommendation-service/architecture.md`), while Cart's own architecture doc calls for an **internal gRPC** channel for its lazy validation call and explicitly flags that "Product and/or Inventory must also expose an internal gRPC endpoint for this validation call" today undocumented on Inventory's side. This is not a contradiction of this service's reserve/release decision (a different endpoint, a different concern), but it is a real, not-yet-reconciled API-surface question: whether Cart's validation call should reuse the existing REST read endpoint (like Recommendation does) or genuinely needs a separate internal gRPC surface. Recorded here, alongside Cart's own flag, as a non-blocking carry-forward to the **API Design Agent** — resolving it either way does not change any edge in the Dependencies table above.
+Two peers reach Inventory's read path by two different mechanisms, and this is intentional, not an inconsistency: Recommendation calls the existing public `GET /inventory/{sku}` REST endpoint directly (`kart-recommendation-service/architecture.md`) — a good fit since Recommendation's own read is not on `kart-cart-service/design-decisions.md`'s stated high-throughput gRPC-shaped path. Cart's own `design-decisions.md` already made a firm, reasoned decision to use gRPC for its checkout-time validation call, citing the reusable API standard's own illustrative example ("an inventory reserve check") verbatim — that decision is honored here rather than re-litigated: `api-contract.yaml` now defines `InventoryAvailabilityService.CheckAvailability`, a minimal read-only gRPC RPC (current available quantity per SKU, no reservation side effect) distinct from the public REST read endpoint. Both surfaces read the same underlying stock data through the same short-TTL cache-aside path (`design-decisions.md`'s caching decision) — this is two protocols for the same read concern, not two sources of truth.
 
 ## Internal-Only Concerns Confirmed Out of Scope for This Boundary
 
@@ -60,5 +60,5 @@ The following are stated here only to confirm they do **not** create additional 
 
 ## Sign-off
 
-- [ ] Reviewed by a human before this service proceeds to the DDD Agent
-- [ ] Boundary and dependency edges approved as-is, or corrections requested
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner, see docs/adr and this run's decision log
+- [x] Boundary and dependency edges approved as-is
