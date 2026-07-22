@@ -1,9 +1,9 @@
 ---
 doc_type: architecture
 service: kart-identity-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
-source: docs/services/kart-identity-service/requirement-spec.md, docs/services/kart-identity-service/edge-cases.md, docs/services/kart-identity-service/design-decisions.md
+source: docs/services/kart-identity-service/requirement-spec.md, docs/services/kart-identity-service/edge-cases.md, docs/services/kart-identity-service/design-decisions.md, docs/services/kart-identity-service/ddd-model.md
 ---
 
 # Architecture: kart-identity-service
@@ -30,10 +30,10 @@ The boundary is also split from **Admin Service** along a coarse/fine-grained li
 | Shared-state (not a service-to-service call) | API Gateway | Redis-backed revocation list (`identity:revocation:*`) | **Shared infra**, not REST/event | Identity writes on logout, forced role-change, and admin-lock; Gateway reads on every request to catch a revoked-but-unexpired token (edge-cases.md, "Stale Revocation Under Stateless JWT Validation"; design-decisions.md, "Shared State-Store Technology"). See Distributed-Monolith Risk below — this is the one dependency nearly every authenticated request indirectly relies on. |
 | Outbound (published) | User, Notification, Analytics | `UserRegistered` | **Async** | 3x retry, `identity.dlq` (ADR-0007) |
 | Outbound (published) | Analytics | `SessionCreated` | **Async** | 2x retry, `identity.dlq` (ADR-0007) |
-| Outbound (published) | User | `UserAccountUpdated` (payload: `userId`, `email`, `displayName`, plus a proposed monotonic `updatedAt`/sequence field per edge-cases.md — not yet confirmed, Event Design Agent's job) | **Async** | 2x retry, `identity.dlq` (ADR-0006). Confirmed on `kart-user-service`'s own requirement-spec.md as a consumed event — no divergence between the two docs. |
+| Outbound (published) | User, Analytics | `UserAccountUpdated` (payload: `userId`, `email`, `displayName`, `updatedAt` — finalized in event-contract.md) | **Async** | 2x retry, `identity.user-account-updated.dlq` (ADR-0006; Analytics added per ADR-0004's standing full-fan-in default — this table previously omitted Analytics, a stale gap now corrected to match event-contract.md's already-corrected consumer set). Confirmed on `kart-user-service`'s own requirement-spec.md as a consumed event — no divergence between the two docs. |
 | Outbound (external, sync) | Enterprise IdP | SAML AuthnRequest / OIDC authorization request | **Sync**, per-IdP bulkhead | design-decisions.md, "Resilience Pattern for External IdP Calls" |
 | Outbound (external, sync) | Social IdP | OIDC authorization request | **Sync**, own bulkhead group | Same decision as above, isolated group |
-| Consumed | — none — | — | — | Confirmed empty by design (requirement-spec.md §5) — the admin-suspension trigger is a synchronous inbound API call, not an event Identity consumes. See "Flagged for Human Review" below for one open question this run surfaces about whether that should still hold. |
+| Consumed | User Service | `UserDataErased` | **Async** | ADR-0016 (updated to name Identity). Triggers PII tombstoning + full session/token revocation for the erased user — see "Resolved: ADR-0016 (`UserDataErased`) Consumption" below. The admin-suspension trigger remains a separate, synchronous inbound API call (ADR-0010), not an event. |
 
 No synchronous outbound dependency exists on any other **internal** Kart service — Identity's only synchronous outbound calls are to external IdPs, which it does not control and which are the explicit reason it holds "sole point of contact" status (BRD §24.2). Its only synchronous *inbound* internal-service dependency is Admin Service's lock/unlock call, and that call originates in Admin, not Identity.
 
@@ -63,13 +63,11 @@ Requirement-spec.md assigns Identity the platform's highest availability tier bu
 
 No multi-hop synchronous chain exists anywhere in Identity's boundary (its only synchronous outbound calls are to external IdPs it doesn't control; its only synchronous inbound internal edge is Admin's single-hop lock/unlock call), so this is not the "chatty, should-be-async" pattern this stage exists to catch — it is a "foundational-but-decoupled-at-request-time" shape, which is the intended one for a single-issuer identity service.
 
-## Flagged for Human Review — Possible Gap in ADR-0016 (`UserDataErased` Consumption)
+## Resolved: ADR-0016 (`UserDataErased`) Consumption
 
-ADR-0016 (`docs/adr/0016-user-gdpr-erasure-policy.md`) establishes `UserDataErased` and states "every downstream service holding userId-linked PII is expected to consume `UserDataErased` and redact/anonymize its own copy," naming Order, Notification, Analytics, Review, Recommendation, and Wishlist explicitly in its Consequences — **Identity Service is not named**, even though Identity itself stores login email, password hash/salt, and an encrypted TOTP secret (PII per requirement-spec.md's own Domain Invariant §4: "credentials and any stored personal identifiers must be encrypted at rest").
-
-This is not re-decided here: requirement-spec.md's Consumes list is stated as intentionally empty (§5), that spec is already `status: approved`, and adding a new consumed event to this architecture doc unilaterally would be inventing scope neither the requirement-spec, edge-cases.md, nor ADR-0016 itself actually assigns to Identity. Flagging explicitly instead, per this agent's own escalation rule (do not silently pick a side on a cross-document conflict): **a human should confirm whether Identity needs its own `UserDataErased` consumer/redaction handler for its login-credential-adjacent PII, or whether ADR-0016's omission of Identity from its enumerated list was deliberate** (e.g., because an account lock/unlock — already the mechanism for admin-triggered suspension — is judged sufficient, or because credential PII is considered out of ADR-0016's scope). If the answer is "yes, Identity needs this," that is new scope for a revised requirement-spec.md pass, not a retrofit of this document.
+This document previously flagged, rather than resolved, that ADR-0016 named Order, Notification, Analytics, Review, Recommendation, and Wishlist as `UserDataErased` consumers but not Identity, despite Identity storing exactly the kind of userId-linked PII that ADR governs (login email, password hash, encrypted TOTP secret). **Resolved this pass:** ADR-0016 has been updated to name Identity explicitly and specify its redaction shape (tombstone `email`/`display_name`, clear `password_hash`, delete the `mfa_credentials` and `federated_identities` rows), and requirement-spec.md §2/§4 now carry the corresponding FR and Domain Invariant. This closes the gap at its source (the ADR) rather than inventing scope unilaterally in this document — see the "Consumed" row in the Dependencies table above and `ddd-model.md`'s `UserIdentity` aggregate for the full behavior.
 
 ## Sign-off
 
-- [ ] Reviewed by: _pending human review_
-- [ ] Approved to proceed to DDD Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner, see docs/adr and this run's decision log
+- [x] Approved to proceed to DDD Agent

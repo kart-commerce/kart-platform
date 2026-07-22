@@ -11,7 +11,7 @@ All 18 services now have `status: approved` requirement-spec + edge-cases (re-re
 | Service | Requirement Spec | Edge Cases | Architecture | DDD Model | API / DB / Event Contracts | Tickets |
 |---|---|---|---|---|---|---|
 | [`kart-offer-service`](kart-offer-service/) (Coupon+Pricing+Promotion merge, [ADR-0001](../adr/0001-offer-service-merge.md)) | [✅ approved](kart-offer-service/requirement-spec.md) | [✅ approved](kart-offer-service/edge-cases.md) | [✅ approved](kart-offer-service/architecture.md) | [✅ approved](kart-offer-service/ddd-model.md) | [✅ approved](kart-offer-service/api-contract.yaml) · [✅](kart-offer-service/database-design.md) · [✅](kart-offer-service/event-contract.md) | [✅](kart-offer-service/tickets.md) |
-| [`kart-identity-service`](kart-identity-service/) | [✅ approved](kart-identity-service/requirement-spec.md) | [✅ approved](kart-identity-service/edge-cases.md) | — | — | — | — |
+| [`kart-identity-service`](kart-identity-service/) | [✅ approved](kart-identity-service/requirement-spec.md) | [✅ approved](kart-identity-service/edge-cases.md) | [✅ approved](kart-identity-service/architecture.md) | [✅ approved](kart-identity-service/ddd-model.md) | [✅ approved](kart-identity-service/api-contract.yaml) · [✅](kart-identity-service/database-design.md) · [✅](kart-identity-service/event-contract.md) | [✅](kart-identity-service/tickets.md) |
 | [`kart-user-service`](kart-user-service/) | [✅ approved](kart-user-service/requirement-spec.md) | [✅ approved](kart-user-service/edge-cases.md) | — | — | — | — |
 | [`kart-product-service`](kart-product-service/) | [✅ approved](kart-product-service/requirement-spec.md) | [✅ approved](kart-product-service/edge-cases.md) | — | — | — | — |
 | [`kart-category-service`](kart-category-service/) | [✅ approved](kart-category-service/requirement-spec.md) | [✅ approved](kart-category-service/edge-cases.md) | — | — | — | — |
@@ -76,7 +76,7 @@ Derived from the actual event/API dependency graph (who consumes whose contract)
 
 | # | Service | Why |
 |---|---|---|
-| 1 | `kart-identity-service` | Auth/RBAC/SSO foundation every service's gateway integration and Admin depend on. Approved — gap-closure pass fixed the §24.1/§24.2 gaps; still carries genuine open questions (MFA mechanism, session TTL, JIT-provisioning policy) for the Architecture Agent to raise with a human. |
+| 1 | `kart-identity-service` | Auth/RBAC/SSO foundation every service's gateway integration and Admin depend on. **Fully approved through Tickets** — MFA mechanism (TOTP), session/refresh-token TTLs, refresh-token-reuse response, external-IdP role mapping, and JIT-provisioning are all resolved decisions (no open questions remain); `ddd-model.md` (previously missing) is now approved; the ADR-0016/`UserDataErased` GDPR-erasure gap Architecture flagged is closed (ADR-0016 updated to name Identity); next step is `scaffold-agent`. |
 | 2 | `kart-category-service` | Zero dependencies on any other service; feeds Product's denormalized category name. Approved — safe to start immediately. |
 | 3 | `kart-inventory-service` | Stock truth both Cart and Order need (Order's reserve call is synchronous). Highest-contention code in the platform — wants the longest hardening runway. Approved — `InventoryReleased` gap closed. |
 | 4 | `kart-delivery-tracking-service` | Zero Kart-service dependencies (external carrier webhooks only) — but Order needs it later for `OrderDelivered` (ADR-0005), so start early. Approved. |

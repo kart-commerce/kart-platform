@@ -67,6 +67,27 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 
 **Note on referenced terms:** `kart-analytics-service` deliberately does not decompose any consumed event's payload into modeled reference fields (no `IngestedEvent.orderId`, no `IngestedEvent.userId` as a typed reference) — every other bounded context's own domain terms (Order, Payment, Product, User, etc.) are stored only as opaque, registry-validated `payload` data on `IngestedEvent`, never redefined or partially modeled here. This opacity **is** this context's Anti-Corruption Layer; see `docs/services/kart-analytics-service/ddd-model.md`'s "Referenced Elsewhere" section for the full rationale. No per-term reference table is added here for the same reason.
 
+## Owned by `kart-identity-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| UserIdentity | The account/credential/role aggregate — native, social-federated, and enterprise-federated accounts all share this one shape; the single source of truth for "who is this" platform-wide | Aggregate root |
+| UserId | The stable identifier issued by Identity for a `UserIdentity`; every other bounded context that needs to reference "which user" does so via this opaque id, never redefining identity itself | Value object |
+| FederatedIdentity | One external IdP link (enterprise SAML/OIDC or social OIDC) to a `UserIdentity`, JIT-created on first successful federation | Entity |
+| MfaCredential | The single active-or-pending TOTP (RFC 6238) credential for a `UserIdentity` | Entity |
+| RoleGrant | A `(Role, GrantedAt, GrantedBy, RevokedAt)` tuple; the platform's single source of truth for "does this user hold this role" — no other service maintains an independent copy | Value object |
+| Session | The login-to-logout/revocation lifecycle a refresh-token rotation family belongs to | Aggregate root |
+| RefreshToken | A single-use, rotation-chained token within a `Session`; replay of an already-consumed one revokes the entire `Session` | Entity |
+| ServicePrincipal | An OAuth2 Client Credentials-flow identity (Partner API clients, or another service's internal caller) — never has a `Session`/`RefreshToken` | Aggregate root |
+| IdpGroupRoleMapping | The config-driven, fail-closed authority mapping one enterprise IdP's group/claim value to exactly one Kart role | Aggregate root |
+| UserDataErased | Consumed domain event (ADR-0016): triggers PII tombstoning on `UserIdentity` and full `Session` revocation | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-identity-service` uses it |
+|---|---|---|
+| Admin (fine-grained permission grant) | kart-admin-service | Identity resolves only the coarse `Admin` `RoleGrant`; Admin Service owns and consults the separate, narrower `admin_permission_grants` table for which back-office categories an `Admin`-role holder can exercise (ADR-0010) |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |
