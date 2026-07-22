@@ -52,7 +52,7 @@ Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer
 | `PaymentCompleted` | `orderId, txnId` | 5x (money-critical), `payment.dlq`, paged on-call | BRD §10 |
 | `PaymentFailed` | `orderId, reason` | 5x, `payment.dlq`, paged on-call | BRD §10 |
 | `RefundIssued` | `orderId, refundId, amount` | 5x, `payment.dlq`, paged on-call | ADR-0007 |
-| `ChargebackReceived` | `orderId, paymentIntentId, chargebackId, amount, reason` | 5x, `payment.dlq`, paged on-call | [ADR-0012](../../adr/0012-payment-chargeback-handling.md) — **status: proposed**, not yet `accepted`; cited as the current best record, not a settled fact |
+| `ChargebackReceived` | `orderId, paymentIntentId, chargebackId, amount, reason` | 5x, `payment.dlq`, paged on-call | [ADR-0012](../../adr/0012-payment-chargeback-handling.md) — **status: accepted** (updated during `kart-payment-service`'s own pipeline completion pass, which also finalized this event's concrete DLQ name as `payment.chargeback-received.dlq` per that service's `event-contract.md`; this table's simplified BRD-style shared `payment.dlq` label predates that split and is retained here only as Analytics' own delivery-to-Analytics DLQ, a separate concern from Payment's publisher-side DLQ naming) |
 
 ### Shipping / Delivery Tracking
 

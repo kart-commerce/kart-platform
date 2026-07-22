@@ -1,13 +1,13 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR-0012: Chargeback/Dispute Handling — New `ChargebackReceived` Event
 
 ## Status
 
-Proposed (pending sequential ADR number assignment)
+Accepted
 
 ## Context
 

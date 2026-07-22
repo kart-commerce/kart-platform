@@ -69,6 +69,7 @@ graph TB
     Payment[kart-payment-service<br/>Payment intents + Charge + Refund + Chargeback]
     PaymentGW[Payment Gateway<br/>external, tokenized card processing]
     Order -. OrderCreated .-> Payment
+    Order -->|"sync, POST /payments/{id}/refund (saga-compensation trigger, direct call not gateway-proxied)"| Payment
     Payment -->|"sync, tokenized charge/refund call, circuit breaker"| PaymentGW
     PaymentGW -.->|"async webhook, POST /payments/webhooks/{gateway}"| Payment
     Payment -. PaymentCompleted .-> Order

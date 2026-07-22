@@ -77,12 +77,13 @@ See [full architecture doc](../services/kart-payment-service/architecture.md).
 | Inbound | Payment Gateway (external) | Tokenized charge/refund API call | Sync (external) |
 | Inbound | Payment Gateway (external) | `POST /payments/webhooks/{gateway}` | Async (external) |
 | Inbound (client-facing) | API Gateway → client / Support Agent tooling | `POST /payments/charge`, `POST /payments/{id}/refund` | Sync |
+| Inbound (internal, saga compensation) | Order (Saga orchestrator) | `POST /payments/{id}/refund` (direct call, not gateway-proxied) | Sync |
 | Outbound | Order, Notification, Analytics | `PaymentCompleted` | Async |
 | Outbound | Order, Notification, Analytics | `PaymentFailed` | Async |
 | Outbound | Order, Notification, Analytics | `RefundIssued` | Async |
 | Outbound | Order, Notification, Analytics | `ChargebackReceived` (new, [ADR-0012](../adr/0012-payment-chargeback-handling.md)) | Async |
 
-No synchronous outbound dependency on any other Kart service — only sync outbound edge is to the external Payment Gateway. Required saga step in the Order Saga's success and compensation flows (BRD §12.1/§12.2), but coupled to Order fully asynchronously in both directions (see architecture.md's Sync/Async Resolution section for how this reconciles with BRD §12's uniform-looking sequence-diagram arrows). Refunds are tracked as their own Saga instance, distinct from the Order Saga's state machine.
+No synchronous outbound dependency on any other Kart service — only sync outbound edge is to the external Payment Gateway. Required saga step in the Order Saga's success and compensation flows (BRD §12.1/§12.2). The charge path (`OrderCreated` → charge) is coupled to Order fully asynchronously (see architecture.md's Sync/Async Resolution section for how this reconciles with BRD §12's uniform-looking sequence-diagram arrows); the one exception is a single synchronous inbound edge from Order for saga-compensation refunds (Order calling `POST /payments/{id}/refund` directly when a later saga step fails after Payment already succeeded — see architecture.md's Compensation-Refund Trigger section), mirroring how Order already calls Inventory's reserve endpoint synchronously. Refunds are tracked as their own Saga instance, distinct from the Order Saga's state machine.
 
 ## kart-admin-service
 

@@ -196,6 +196,30 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | UserId / UserDataErased | kart-identity-service / kart-user-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself. Consuming `UserDataErased` (ADR-0016, updated to name Cart) deletes every Cart owned by that `UserId` — Cart never models the erasure workflow itself, only reacts to it |
 | Order | kart-order-service | `CartCheckedOut` is published for Analytics only; Cart never models Order's own Saga/state machine, and Order's creation trigger (`POST /orders`) bypasses Cart entirely |
 
+## Owned by `kart-payment-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| PaymentIntent | The authoritative record of a single charge's lifecycle (`Pending`/`Completed`/`Failed`/`Disputed`); never delegated to or duplicated inside the Order Saga's own state machine | Aggregate root |
+| Refund | A (possibly partial) reversal against a `PaymentIntent`'s `CapturedAmount`; a child of `PaymentIntent`, not its own aggregate, since the refund-ceiling invariant must be checked atomically against the same row it belongs to | Entity |
+| GatewayToken | The opaque, gateway-issued reference to tokenized card data a `PaymentIntent` holds; raw card data is never persisted | Value object |
+| CapturedAmount | The `{ amount, currency }` ceiling every `Refund` under a `PaymentIntent` is checked against | Value object |
+| PaymentIntentStatus | The `Pending`/`Completed`/`Failed`/`Disputed` state machine a `PaymentIntent` moves through; monotonic — once terminal, only the single `Completed → Disputed` escalation is accepted | Value object |
+| ChargebackRecord | The single, overwritable `{ chargebackId, amount, reason, receivedAt }` record set on a `PaymentIntent` when a chargeback is ingested (ADR-0012's minimal "stop the bleeding" scope, not a full dispute-lifecycle history) | Value object |
+| IdempotencyRecord | The reservation-then-confirmation ledger entry for one `(idempotencyKey, endpoint)` pair, bridging the non-transactional external gateway call between reserving a charge/refund attempt and confirming its outcome | Aggregate root |
+| IdempotencyKeyScope | The `{ idempotencyKey, endpoint }` composite identity an `IdempotencyRecord` is uniquely keyed on — scoped so a charge-key and a refund-key can't collide on the same caller-supplied value | Value object |
+| GatewayWebhookEvent | The idempotency ledger entry recognizing a duplicate or out-of-order asynchronous gateway confirmation (charge/refund settlement, chargeback notification) by the gateway's own event id; mirrors `kart-delivery-tracking-service`'s `WebhookDedupEntry` for the payment-gateway analogue | Aggregate root |
+| PaymentCompleted | Domain event: fired exactly once when a `PaymentIntent` reaches `Completed` | Domain event |
+| PaymentFailed | Domain event: fired exactly once when a `PaymentIntent` reaches `Failed`; never fired speculatively while the gateway outcome is still ambiguous | Domain event |
+| RefundIssued | Domain event: fired once per successful `Refund`, carrying that `Refund`'s own id/amount — one event per partial refund | Domain event |
+| ChargebackReceived | Domain event (ADR-0012, new — not previously named in the BRD): fired once a chargeback notification is ingested and `ChargebackRecord`/`Disputed` are set | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-payment-service` uses it |
+|---|---|---|
+| Order (`orderId`) | kart-order-service | Every `PaymentIntent`/event carries `orderId` as an opaque reference only; Payment never models Order's own Saga/state machine, only reacts to `OrderCreated` and accepts a direct compensating-refund call from Order as Saga orchestrator |
+
 ## Owned by `kart-wishlist-service`
 
 | Term | Definition | Kind |

@@ -1,0 +1,321 @@
+# doc_type: api-contract
+# service: kart-payment-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source: docs/services/kart-payment-service/ddd-model.md, docs/services/kart-payment-service/design-decisions.md,
+#   docs/services/kart-payment-service/database-design.md, docs/services/kart-payment-service/architecture.md,
+#   docs/standards/kart-conventions.md (API Versioning section), docs/adr/0012-payment-chargeback-handling.md
+#
+# Every service starts at /v1 (kart-conventions.md). `Idempotency-Key` is mandatory on every
+# money-moving POST here (charge, refund) per api-standards.md and BRD §24. Publishing a stable
+# copy to a shared-contracts repo is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-payment-service API
+  version: 1.0.0
+  description: >
+    Idempotent charge execution, partial refunds, async gateway-confirmation ingestion
+    (including chargebacks, ADR-0012). PCI-scope isolated — this is the only service in the
+    platform that touches gateway tokens (BRD §5.3 Boundary Rationale).
+
+servers:
+  - url: https://api.kart.example/payments
+    description: >
+      Public API Gateway. Serves the client-facing surface — `/v1/payments/charge`,
+      `/v1/payments/{id}/refund` (also called by Support Agent tooling, BRD §22), and
+      `/v1/payments/{id}` (read).
+  - url: https://internal.kart.local/payments
+    description: >
+      Internal network segment. `/v1/payments/{id}/refund` is additionally reachable here,
+      direct service-to-service (not gateway-proxied), by Order's Saga orchestrator issuing a
+      compensating refund (architecture.md's Compensation-Refund Trigger section) — same
+      endpoint, same idempotency mechanism, a different caller identity.
+  - url: https://internal.kart.local/payments/webhooks
+    description: >
+      Gateway-facing only, never exposed to clients. Ingests asynchronous charge/refund
+      confirmation and chargeback notifications from the payment gateway.
+
+paths:
+  /v1/payments/charge:
+    post:
+      operationId: chargePayment
+      summary: Execute an idempotent charge against the payment gateway.
+      description: >
+        requirement-spec §2/§5 (BRD §5.3). Primary trigger in the current saga design is the
+        `OrderCreated` consumer (architecture.md's Sync/Async Resolution), which derives its own
+        deterministic `Idempotency-Key` from `(orderId, "charge")` and calls this same code path —
+        this endpoint is the synchronous entry point any direct/manual caller (e.g. a future
+        support-tooling manual retry) would use. `gatewayToken` is a client-side-tokenized payment
+        method reference (per the gateway's own tokenization SDK) — never raw card data
+        (requirement-spec Domain Invariant #4, BRD §24).
+      security:
+        - bearerAuth: [customer]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            `(idempotencyKey, endpoint="charge")`-scoped, 24h TTL replay window
+            (design-decisions.md's Idempotency Mechanism decision). Identical-payload replay
+            returns the stored result with no second gateway call; mismatched-payload replay
+            is `409`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, amount, gatewayToken]
+              properties:
+                orderId: { type: string }
+                amount: { $ref: '#/components/schemas/Money' }
+                gatewayToken: { type: string, description: "Opaque, gateway-issued payment method reference." }
+      responses:
+        '200':
+          description: >
+            Charge attempt accepted and processed synchronously against the gateway (bounded
+            transient-retry + circuit breaker, design-decisions.md). `status` reflects the actual
+            outcome — `completed`/`failed` if the gateway resolved synchronously, `pending` if the
+            outcome is still ambiguous after retries are exhausted (resolved later via the webhook
+            path or reconciliation, requirement-spec Open Question #9 resolution). `PaymentCompleted`
+            or `PaymentFailed` is published exactly once, only once the intent reaches a terminal state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntentView' }
+        '409':
+          description: "Same `Idempotency-Key` reused with a different request payload within the 24h TTL window."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/payments/{id}:
+    get:
+      operationId: getPaymentIntent
+      summary: Read a PaymentIntent's current state.
+      description: >
+        Not a BRD-stated endpoint — added as a single-service engineering default so Support Agent
+        tooling can see `capturedAmount` and total already-refunded before deciding a refund amount
+        within BRD §22's "up to $X" cap (the API Gateway's coarse RBAC check cannot know the order
+        total, so this fine-grained data must come from Payment itself), and so Order/on-call can
+        inspect state during an incident. Served directly from PostgreSQL — no read-model projection
+        exists or is needed (database-design.md).
+      security:
+        - bearerAuth: [customer, support_agent]
+        - orderServicePrincipal: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntentView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/payments/{id}/refund:
+    post:
+      operationId: refundPayment
+      summary: Issue a (possibly partial) refund against a completed charge.
+      description: >
+        requirement-spec §2/§5 (BRD §5.3), supports partial refunds (Open Question #6 resolution).
+        Two distinct caller classes reach this same endpoint/code path: Support Agent tooling via
+        the public API Gateway server (BRD §22, fine-grained per-refund-amount check enforced here
+        since the gateway's coarse RBAC can't know the order total), and Order's Saga orchestrator
+        via the internal server, issuing a compensating refund when a later saga step fails after
+        this charge already succeeded (architecture.md's Compensation-Refund Trigger — Order derives
+        its own deterministic `Idempotency-Key` from `(orderId, paymentIntentId, "compensation-refund")`).
+        Settlement is asynchronous relative to this call (requirement-spec Open Question #5
+        resolution) — this endpoint's P95 < 300ms budget covers only the synchronous accept/enqueue
+        of the refund request, not gateway-side settlement; `RefundIssued` publishes later, once
+        settlement actually completes.
+      security:
+        - bearerAuth: [customer, support_agent]
+        - orderServicePrincipal: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            `(idempotencyKey, endpoint="refund")`-scoped — BRD §24's general money-moving-POST rule,
+            not stated for refund explicitly in BRD §5.3 but required platform-wide (requirement-spec §2).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { $ref: '#/components/schemas/Money' }
+      responses:
+        '202':
+          description: >
+            Refund request accepted and enqueued; settlement is asynchronous. `RefundIssued`
+            publishes once the gateway confirms (via webhook) that this specific refund succeeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RefundView' }
+        '409':
+          description: >
+            Either (a) `SUM(refunds.amount) + amount` would exceed `PaymentIntent.capturedAmount`,
+            (b) the `PaymentIntent` is `disputed` and rejects new refund attempts (ADR-0012,
+            edge-cases.md "Refund Racing a Chargeback/Dispute"), (c) the underlying `PaymentIntent`
+            has not yet reached a terminal state — a refund against a still-pending/unresolved
+            charge is rejected, never fired unconditionally (design-decisions.md's Saga Compensation
+            Gating decision), or (d) the same `Idempotency-Key` reused with a different payload.
+            The response body's `code` field distinguishes which.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/payments/webhooks/{gateway}:
+    post:
+      operationId: ingestGatewayWebhook
+      summary: Ingest an asynchronous gateway confirmation (charge, refund settlement, or chargeback).
+      description: >
+        Not a BRD-stated endpoint — added to close the async gateway-confirmation gap
+        (requirement-spec Open Question #3 resolution). Gateway-facing only, never exposed to
+        clients. Idempotent-by-gateway-event-ID (`GatewayWebhookEvent`, ddd-model.md) with a
+        monotonic state-ordering guard on the referenced `PaymentIntent` rejecting any transition
+        older than its currently stored state (edge-cases.md "Gateway Webhook Arriving Out-of-Order
+        or Duplicated"). This is also the ingestion path chargeback/dispute notifications arrive
+        through (ADR-0012) — same signature-verification and dedup mechanism, a different
+        `eventType`. Signature verification (`Gateway-Signature`) happens before dedup/ordering is
+        applied, the same "verify, then dedup, then apply" shape already established for
+        `kart-delivery-tracking-service`'s carrier-webhook ingestion.
+      security:
+        - gatewaySignature: []
+      parameters:
+        - name: gateway
+          in: path
+          required: true
+          schema: { type: string }
+          description: Which configured gateway adapter this delivery came from.
+        - name: Gateway-Signature
+          in: header
+          required: true
+          schema: { type: string }
+          description: HMAC signature over the raw request body, verified against this gateway's configured signing secret before any other processing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gatewayEventId, eventType, paymentIntentId]
+              properties:
+                gatewayEventId: { type: string, description: "Gateway-assigned; the GatewayWebhookEvent dedup key." }
+                eventType: { type: string, enum: [charge_succeeded, charge_failed, refund_succeeded, chargeback_received] }
+                paymentIntentId: { type: string, format: uuid }
+                refundId: { type: string, nullable: true, description: "Present only when eventType = refund_succeeded." }
+                chargeback:
+                  type: object
+                  nullable: true
+                  description: "Present only when eventType = chargeback_received."
+                  properties:
+                    chargebackId: { type: string }
+                    amount: { $ref: '#/components/schemas/Money' }
+                    reason: { type: string }
+      responses:
+        '200':
+          description: >
+            Accepted (or recognized as an already-processed duplicate — idempotent no-op either
+            way, per `GatewayWebhookEvent`'s own invariant). Publishes `PaymentCompleted`,
+            `PaymentFailed`, `RefundIssued`, or `ChargebackReceived` as appropriate, exactly once
+            per underlying business transition.
+        '401':
+          description: Signature verification failed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: >
+            The implied state transition is older than `PaymentIntent`'s currently stored state
+            (monotonic-ordering guard rejected it) — accepted as a recognized no-op, not retried
+            by the gateway as a failure.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Identity-issued token, coarse-checked at the API Gateway (BRD §18/§24.1) and re-checked
+        here at fine grain where the gateway can't know the order total (e.g. Support Agent's
+        per-refund-amount cap, BRD §22).
+    orderServicePrincipal:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            payment-compensation: >
+              kart-order-service's Saga orchestrator, calling directly (not gateway-proxied) to
+              issue a compensating refund (architecture.md's Compensation-Refund Trigger) or to
+              read a PaymentIntent's state.
+    gatewaySignature:
+      type: apiKey
+      in: header
+      name: Gateway-Signature
+      description: >
+        HMAC signature over the raw request body, verified against the configured gateway's
+        signing secret (held as a Kubernetes Secret, BRD §22) before any dedup/ordering logic runs.
+
+  schemas:
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
+
+    PaymentIntentView:
+      type: object
+      required: [paymentIntentId, orderId, status, capturedAmount]
+      properties:
+        paymentIntentId: { type: string, format: uuid }
+        orderId: { type: string }
+        status: { type: string, enum: [pending, completed, failed, disputed] }
+        capturedAmount: { $ref: '#/components/schemas/Money' }
+        txnId: { type: string, nullable: true, description: "Gateway-assigned transaction id, set once status = completed." }
+        totalRefunded: { type: number, description: "SUM(refunds.amount WHERE status = 'succeeded') — the running total already refunded against capturedAmount." }
+        disputed: { type: boolean, description: "True iff status = disputed (ChargebackRecord present, ADR-0012)." }
+        createdAt: { type: string, format: date-time }
+
+    RefundView:
+      type: object
+      required: [refundId, paymentIntentId, amount, status]
+      properties:
+        refundId: { type: string, format: uuid }
+        paymentIntentId: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        requestedAt: { type: string, format: date-time }
