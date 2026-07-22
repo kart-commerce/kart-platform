@@ -26,7 +26,8 @@
 # architecture.md's "Resolved: Dashboards/Funnels Query Surface" (D4b). Analytics' actual
 # ingestion path (Kafka, full fan-in per ADR-0004, schema-registry-gated per requirement-spec
 # §6 D2) is consumer-only and has no synchronous request/response shape — it is not modeled
-# here; it belongs in this service's future event-contract.md, not this OpenAPI document.
+# here; it belongs in this service's event-contract.md (now authored, status: pending-approval,
+# consistent with this contract's own read-only surface), not this OpenAPI document.
 #
 # No endpoint here mutates state or money-adjacent state (GET-only, read models rebuilt from
 # the raw event log per ddd-cqrs-standards.md): the `Idempotency-Key` header required by

@@ -47,3 +47,43 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 |---|---|---|
 | Order | kart-order-service | `TrackingRecord.orderId` is a reference field only, populated from `ShipmentDispatched`'s payload; never models Order's own state machine |
 | Shipment / `ShipmentDispatched` | kart-shipping-service | Consumed only as the `TrackingRecord` creation trigger; never models Shipping's own aggregate |
+
+## Owned by `kart-analytics-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| IngestedEvent | The durable, idempotently-upserted (by `EventId`) landing record for one instance of any platform event, consumed under the full fan-in default ([ADR-0004](../adr/0004-analytics-full-fanin-ingestion.md)); the single source of truth every dashboard/funnel read model is recomputed from | Aggregate root |
+| EventId | The publisher-assigned event identifier; the de-dup/idempotency key for `IngestedEvent` | Value object |
+| SchemaVersionPointer | `{ schemaId, versionLabel }` — the Confluent schema-registry-assigned id (wire-format version pointer) plus its human-readable `MAJOR.MINOR` subject-metadata label (requirement-spec.md §6 D2) | Value object |
+| EventEnvelope | The publisher-supplied metadata common to every consumed event regardless of type: `eventType`, `publisherService`, `partitionKey`, `occurredAt` | Value object |
+| DeadLetteredEvent | The parked record of a consumed event that exhausted its 3x exponential-backoff retry budget while Analytics attempted to persist it (requirement-spec.md §6 D5); references its originating `EventId` by value, never by transactional foreign key | Aggregate root |
+| ReconciliationRun | The audit record of one nightly batch reconciliation pass (at most one per `RunDate`), whose completion is what flips read-model documents from provisional to final | Aggregate root |
+| PiiRedactionRecord | The immutable, compliance-facing audit record of one `UserDataErased`-triggered redaction sweep across `IngestedEvent` ([ADR-0016](../adr/0016-user-gdpr-erasure-policy.md) item 6) | Aggregate root |
+| EventIngested | Internal-only domain event: raised once a consumed event is durably upserted into `IngestedEvent`; drives the near-real-time incremental read-model projector | Domain event |
+| EventDeadLettered | Internal-only domain event: raised when a `DeadLetteredEvent` is created (DLQ hand-off) | Domain event |
+| EventReprocessed | Internal-only domain event: raised when the scheduled reprocessor successfully replays a `DeadLetteredEvent` back into `IngestedEvent` | Domain event |
+| ReconciliationCompleted | Internal-only domain event: raised when a `ReconciliationRun` transitions to `completed`; drives the nightly batch reconciler's read-model write step | Domain event |
+| UserDataRedacted | Internal-only domain event: raised once a redaction sweep for a given `userId` completes across every matching `IngestedEvent` row, immediately before its `PiiRedactionRecord` is written | Domain event |
+
+**Note on referenced terms:** `kart-analytics-service` deliberately does not decompose any consumed event's payload into modeled reference fields (no `IngestedEvent.orderId`, no `IngestedEvent.userId` as a typed reference) — every other bounded context's own domain terms (Order, Payment, Product, User, etc.) are stored only as opaque, registry-validated `payload` data on `IngestedEvent`, never redefined or partially modeled here. This opacity **is** this context's Anti-Corruption Layer; see `docs/services/kart-analytics-service/ddd-model.md`'s "Referenced Elsewhere" section for the full rationale. No per-term reference table is added here for the same reason.
+
+## Owned by `kart-cart-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Cart | The mutable, pre-checkout basket of line items belonging to exactly one owner (a logged-in user or a guest session); the last place customer intent is mutable before Order takes over as Saga orchestrator | Aggregate root |
+| CartLineItem | One `Sku`-and-quantity pairing within a Cart, unique per `Sku` within its parent Cart, carrying its own `LineItemAvailability` flag | Entity |
+| CartOwner | The mutually exclusive `UserId`-or-`GuestSessionId` identity a Cart belongs to; a Cart always has exactly one | Value object |
+| CartVersion | The optimistic-concurrency version counter checked and incremented on every Cart write (direct mutation or merge), rejecting a stale-write conflict | Value object |
+| LineItemAvailability | The `Available`/`FlaggedUnavailable` state of a `CartLineItem`, set by consuming `InventoryReservationFailed` pre-checkout only, cleared on the line item's next successful validation | Value object |
+| CartStatus | The `Active`/`CheckedOut` lifecycle state of a Cart; `CheckedOut` is terminal and gates post-checkout no-op handling of `InventoryReservationFailed` | Value object |
+| GuestSessionId | The opaque anonymous-session identifier Cart treats as one of the two possible `CartOwner` shapes; modeled locally by Cart since no other bounded context currently claims ownership of an anonymous-session concept (see `ddd-model.md` Modeling Decision #4) | Value object |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-cart-service` uses it |
+|---|---|---|
+| Sku / Product | kart-product-service | `CartLineItem.sku` is a reference only, resolved via a synchronous, fail-open lazy-validation call at checkout time; Cart never owns catalog or price data |
+| UserId | kart-identity-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself |
+| Order | kart-order-service | `CartCheckedOut` is published for Analytics only; Cart never models Order's own Saga/state machine, and Order's creation trigger (`POST /orders`) bypasses Cart entirely |
+| InventoryReservationFailed | kart-inventory-service | Consumed only to flag a `CartLineItem`'s availability pre-checkout; Cart never models Inventory's own reservation aggregate |

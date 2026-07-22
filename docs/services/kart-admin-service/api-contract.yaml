@@ -1,0 +1,1129 @@
+# doc_type: api-contract
+# service: kart-admin-service
+# status: pending-approval
+# generated_by: api-design-agent
+# source: docs/services/kart-admin-service/requirement-spec.md,
+#         docs/services/kart-admin-service/edge-cases.md,
+#         docs/services/kart-admin-service/design-decisions.md (proposed),
+#         docs/services/kart-admin-service/architecture.md (pending-approval),
+#         docs/services/kart-admin-service/database-design.md (pending-approval),
+#         docs/services/kart-admin-service/event-contract.md (pending-approval),
+#         docs/adr/0010-admin-service-scope-and-integration.md
+#
+# Process note (per this agent's own input contract): the normal input to this
+# stage is an *approved* ddd-model.md. No ddd-model.md exists for this service
+# at all — database-design.md's and event-contract.md's own header notes
+# already record why and cite the same basis this contract relies on:
+# ADR-0010's Consequences section fixes Admin's domain shape as narrow enough
+# to design directly from requirement-spec.md §4/§6, edge-cases.md,
+# design-decisions.md, architecture.md, database-design.md, and
+# event-contract.md — "Admin's own DDD model has exactly one aggregate root
+# of its own consequence — the admin action / permission grant." This draft
+# was produced anyway, at the orchestrating pipeline's explicit direction,
+# from those docs as the best available grounding (identical situation and
+# identical handling to kart-identity-service/api-contract.yaml, which
+# predates its own ddd-model.md for the same reason). Flagged explicitly
+# rather than silently treated as equivalent to a real ddd-model.md: a human
+# must confirm this contract stays consistent once/if a ddd-model.md is ever
+# produced for this service, and status cannot move past pending-approval
+# until design-decisions.md/architecture.md/database-design.md/event-contract.md
+# are themselves approved.
+#
+# No breaking-change risk: first issue of this contract, nothing published to
+# a shared-contracts repo yet. Publishing a stable copy to kart-shared is
+# deferred until that repo exists in this pipeline's scope (per this agent's
+# standard output note).
+#
+# Idempotency-Key (api-standards.md + design-decisions.md "Idempotency
+# Mechanism for Outbound Write Calls"): api-standards.md itself only mandates
+# this header on money-moving writes, but design-decisions.md explicitly
+# broadens the requirement to *every* mutating /admin/* action for this
+# service specifically — "back-office actions are the platform's highest-
+# privilege operations — double-issuing a coupon or double-locking a user is
+# a real high-impact effect, not a cosmetic one." database-design.md's
+# admin_actions.idempotency_key column is NOT NULL for every category,
+# including the local-only permission-management one, confirming this is
+# universal here, not scoped only to the four business categories' outbound
+# calls. Every mutating endpoint below therefore requires it, including
+# grant issue/revoke.
+#
+# Fine-grained authorization model (requirement-spec.md §6 Decision item 1,
+# Domain Invariant #1): every /admin/* handler below maps to exactly one of
+# five categories (catalog-management, coupon-issuance, user-suspension,
+# inventory-replenishment, permission-management). The coarse `Admin` role
+# claim (bearerAuth below) is necessary but not sufficient — Admin Service
+# additionally checks its own admin_permission_grants table, live, on every
+# request (no caching, per design-decisions.md) for a matching category
+# grant, failing closed (403) if absent even when the coarse claim is valid.
+# This is never modeled as an OpenAPI security scope, because it is a
+# runtime, per-request DB lookup against Admin-owned state — not a claim
+# embedded in the JWT.
+#
+# Synchronous-orchestration note (architecture.md "Sync vs. Async
+# Resolution"; Domain Invariant #2): every mutating endpoint below performs
+# a synchronous outbound call to the owning service (Product, Category,
+# Offer, Identity, or Inventory) *before* committing its own local
+# admin_actions/outbox row and responding — never a 202-style fire-and-forget
+# acceptance. A 503 below always means "the owning service's write did not
+# happen," never "accepted, will retry later."
+#
+# Two endpoints below are additions beyond requirement-spec.md §5's starting
+# API Surface table (which only names the `/admin/*` umbrella and defers the
+# concrete shape to this stage), added because the requirement-spec/edge-
+# cases/design-decisions themselves are otherwise unusable without them (the
+# same reasoning kart-identity-service/api-contract.yaml already used for its
+# own additions):
+#   - GET /admin/permission-grants and POST .../revoke: requirement-spec.md
+#     §6 Decision item 1 requires a `permission-management` meta-category
+#     that grants/revokes the other four, and database-design.md's
+#     admin_permission_grants table exists specifically to back it — no
+#     concrete route existed anywhere upstream, so one is defined here.
+#   - GET /admin/actions: database-design.md's idx_admin_actions_admin_category
+#     index exists specifically to serve "what did this admin do, in which
+#     category, over what window" compliance/audit-review queries
+#     (requirement-spec.md §3 Observability), but no read endpoint over
+#     Admin's own audit trail was named anywhere upstream. Added here so the
+#     index's stated purpose is actually reachable via this contract.
+#
+# Final request/response field shapes for the *downstream* owning services'
+# own write APIs (Product, Category, Offer's coupon-create, Inventory's
+# replenishment path) are each service's own API Design Agent's job, not
+# fixed here (ADR-0010 Consequences: "this ADR fixes the integration pattern
+# ... not each callee's own missing endpoint definition"). The request bodies
+# below are Admin's own best-effort mirror of what each owning service's
+# aggregate needs (e.g. Coupon/RedemptionLimit fields per
+# docs/ddd/ubiquitous-language.md's Offer-owned definitions), flagged
+# per-operation below where the downstream shape is still an assumption to
+# reconcile once that service's own contract exists.
+
+openapi: 3.0.3
+info:
+  title: kart-admin-service API
+  version: 1.0.0
+  description: >
+    Back-office operations and fine-grained, category-scoped RBAC for the
+    platform's four fixed operational categories (catalog management, coupon
+    issuance, user suspension, inventory replenishment) plus a fifth
+    meta-category (permission-management) that governs the other four
+    (BRD §2.1 item 20, §24.1; ADR-0010). Admin Service is an orchestration/
+    control-plane layer only — it never stores a second copy of Product,
+    Category, Coupon, user-identity, or Inventory data (Domain Invariant #3);
+    every mutation here is proxied synchronously to the owning service's own
+    write API after Admin's own fine-grained grant check passes.
+
+servers:
+  - url: /v1
+
+paths:
+  # ---------------------------------------------------------------------
+  # Permission-management (meta-category) — governs the other four
+  # categories (requirement-spec.md §6 Decision item 1). Not self-service
+  # in v1: the very first permission-management grant for a deployment is
+  # seeded out-of-band (one-time ops migration/seed script,
+  # database-design.md granted_by = 'seed-script'); every grant/revoke
+  # after that flows through these routes like any other admin action.
+  # ---------------------------------------------------------------------
+  /admin/permission-grants:
+    get:
+      operationId: listPermissionGrants
+      summary: List permission grants, optionally filtered by principal and/or category.
+      description: >
+        Read path over admin_permission_grants (database-design.md). Backs
+        the same "which categories can this Admin-role holder actually
+        exercise" question every /admin/* handler answers internally on
+        every request, exposed here for operator/audit visibility.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: principalId
+          in: query
+          required: false
+          schema: { type: string }
+        - name: category
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/GrantCategory' }
+        - name: includeRevoked
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Matching grant records.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PermissionGrant' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+        '401':
+          description: Not authenticated (missing/invalid Identity-issued JWT).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `permission-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    post:
+      operationId: issuePermissionGrant
+      summary: Issue (or re-issue) a live category grant to a principal.
+      description: >
+        Requires the caller to hold a live `permission-management` grant
+        themselves (requirement-spec.md §6 Decision item 1). Writes a new
+        admin_permission_grants row and, in the same local transaction, an
+        admin_actions row (action `grant.issue`), then publishes
+        `AdminActionPerformed` via the Outbox pattern (edge-cases.md,
+        "Admin Action Succeeds but AdminActionPerformed Is Lost"). This is a
+        local-only write — no synchronous outbound call to another service
+        is made for this operation.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principalId, category]
+              properties:
+                principalId: { type: string, description: "Identity-issued principal id being granted this category (Domain Invariant #1 — no FK, Identity owns this identifier)." }
+                category: { $ref: '#/components/schemas/GrantCategory' }
+      responses:
+        '201':
+          description: Grant issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionGrant' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `permission-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: A live (non-revoked) grant already exists for this (principalId, category) — matches the partial unique index `uq_admin_permission_grants_live` (database-design.md); revoke the existing grant before re-issuing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/permission-grants/{grantId}/revoke:
+    post:
+      operationId: revokePermissionGrant
+      summary: Revoke a live permission grant.
+      description: >
+        Requires the caller to hold a live `permission-management` grant.
+        Optimistic concurrency via the grant's `version` (design-decisions.md,
+        "Concurrency Control for Back-Office Writes"): the caller must supply
+        the version it last read; a mismatch means another admin already
+        mutated this grant. Takes effect on the affected principal's very
+        next request — no token-TTL exposure window (edge-cases.md, "Stale
+        Admin Permission Outliving an Identity-Side Revocation").
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: grantId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: If-Match
+          in: header
+          required: true
+          description: Expected current `version` of the grant row.
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Grant revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionGrant' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `permission-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: grantId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Stale `If-Match` version (edge-cases.md, "Concurrent Admins Editing the Same Back-Office Record") — re-read and retry.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Catalog management — product half (category `catalog-management`).
+  # Proxies Product Service's own write API (POST /products,
+  # PUT/PATCH /products/{id} — kart-product-service/requirement-spec.md
+  # §5, resolving its Open Question #4 per ADR-0010). Product's
+  # deactivate route is not yet named upstream — assumed here as a
+  # dedicated action route, to reconcile once Product's own contract exists.
+  # ---------------------------------------------------------------------
+  /admin/products:
+    post:
+      operationId: createProduct
+      summary: Create a product and its initial variant/SKU via Product Service.
+      description: >
+        Category `catalog-management`. Calls Product Service's
+        `POST /products` synchronously (internal client-credentials call,
+        ADR-0010 Decision 2) before committing Admin's own audit row; on
+        success publishes `AdminActionPerformed` (action `product.create`)
+        via Outbox. Product Service's own `ProductCreated` event, not this
+        one, is what other services react to for the product itself.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductWriteRequest' }
+      responses:
+        '201':
+          description: Product created (Product Service's write succeeded; Admin's audit row committed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Product Service unavailable (catalog-management circuit breaker open, design-decisions.md "Resilience Pattern for Outbound Calls to Owning Services") — no write happened, safe to retry with the same Idempotency-Key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/products/{productId}:
+    put:
+      operationId: updateProduct
+      summary: Update a product via Product Service's own write API.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: If-Match
+          in: header
+          required: true
+          description: >
+            Version/ETag precondition forwarded to Product Service's own
+            write API (design-decisions.md, "Concurrency Control for
+            Back-Office Writes" — carried as a precondition on the outbound
+            call since Product, not Admin, owns this record's version).
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductWriteRequest' }
+      responses:
+        '200':
+          description: Product updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: productId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Stale `If-Match` version — Product Service rejected the write; re-read and retry (edge-cases.md, "Concurrent Admins Editing the Same Back-Office Record").
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Product Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/products/{productId}/deactivate:
+    post:
+      operationId: deactivateProduct
+      summary: Deactivate a product via Product Service's own write API.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Product deactivated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: productId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Product Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Catalog management — category half (category `catalog-management`).
+  # Proxies Category Service's own write API (kart-category-service/
+  # requirement-spec.md §4/§6 item 6: "Category owns its own write model
+  # and write API; Admin calls it, never writes Category's tables
+  # directly"). Category's own route names are not yet fixed upstream
+  # (its own API Design Agent pass is still pending) — assumed here.
+  # ---------------------------------------------------------------------
+  /admin/categories:
+    post:
+      operationId: createCategory
+      summary: Create a category node via Category Service's own write API.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryWriteRequest' }
+      responses:
+        '201':
+          description: Category node created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Category Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/categories/{categoryId}:
+    put:
+      operationId: updateCategory
+      summary: Update a category node via Category Service's own write API.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+        - name: If-Match
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryWriteRequest' }
+      responses:
+        '200':
+          description: Category node updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Stale `If-Match` version — re-read and retry.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Category Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/categories/{categoryId}/reorder:
+    post:
+      operationId: reorderCategory
+      summary: Change a category node's display order among its siblings.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayOrder]
+              properties:
+                displayOrder: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Category reordered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Category Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/categories/{categoryId}/move:
+    post:
+      operationId: moveCategory
+      summary: Move a category node to a new parent in the taxonomy tree.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newParentId]
+              properties:
+                newParentId: { type: string, nullable: true, description: "null moves the node to become a root category." }
+      responses:
+        '200':
+          description: Category moved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `catalog-management` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: categoryId or newParentId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Category Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Coupon issuance (category `coupon-issuance`). Proxies Offer Service's
+  # POST /coupons and POST /coupons/{couponCode}/deactivate
+  # (kart-offer-service/requirement-spec.md §5, "internal, admin-only" —
+  # ADR-0010). Field names mirror docs/ddd/ubiquitous-language.md's
+  # Offer-owned Coupon/CouponCode/RedemptionLimit definitions.
+  # ---------------------------------------------------------------------
+  /admin/coupons:
+    post:
+      operationId: createCoupon
+      summary: Create a Coupon via Offer Service's admin-only write API.
+      description: >
+        Category `coupon-issuance`. Calls Offer Service's
+        `POST /coupons` synchronously before committing Admin's own audit
+        row (action `coupon.create`).
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CouponWriteRequest' }
+      responses:
+        '201':
+          description: Coupon created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `coupon-issuance` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: couponCode already exists (Offer Service's `coupons.coupon_code` PRIMARY KEY).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Offer Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/coupons/{couponCode}/deactivate:
+    post:
+      operationId: deactivateCoupon
+      summary: Deactivate a Coupon via Offer Service's admin-only write API.
+      description: >
+        Deactivation only prevents future validate/redeem calls from seeing
+        the code as active — it never retroactively invalidates a
+        redemption/quote that already completed
+        (kart-offer-service/requirement-spec.md, Domain Invariant on
+        deactivation).
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: couponCode
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Coupon deactivated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `coupon-issuance` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: couponCode not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Offer Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # User suspension (category `user-suspension`). Proxies Identity
+  # Service's own internal, Admin-scoped routes — exact paths already
+  # fixed by kart-identity-service/api-contract.yaml:
+  # POST /internal/users/{userId}/lock and .../unlock.
+  # ---------------------------------------------------------------------
+  /admin/users/{userId}/lock:
+    post:
+      operationId: lockUser
+      summary: Lock a user's ability to authenticate via Identity Service.
+      description: >
+        Category `user-suspension`. Calls Identity Service's
+        `POST /internal/users/{userId}/lock` synchronously (client-
+        credentials, Admin-scoped — kart-identity-service/api-contract.yaml)
+        before committing Admin's own audit row (action `user.lock`).
+        Identity immediately revokes the locked user's outstanding tokens
+        via its own revocation-list mechanism.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, description: "Optional free-text reason, stored in admin_actions.context for audit richness (database-design.md)." }
+      responses:
+        '200':
+          description: User locked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `user-suspension` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: userId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Identity Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /admin/users/{userId}/unlock:
+    post:
+      operationId: unlockUser
+      summary: Restore a locked user's ability to authenticate via Identity Service.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: User unlocked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `user-suspension` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: userId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Identity Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Inventory replenishment (category `inventory-replenishment`). Proxies
+  # Inventory Service's own replenishment write path — the same path the
+  # threshold-based automated trigger uses
+  # (kart-inventory-service/requirement-spec.md §6 Decision 5: "manual
+  # admin-initiated replenishment remains supported through the identical
+  # replenishment write path"). Inventory itself publishes
+  # `InventoryReplenished`; Admin does not.
+  # ---------------------------------------------------------------------
+  /admin/inventory/{sku}/replenish:
+    post:
+      operationId: replenishInventory
+      summary: Manually trigger a restock adjustment via Inventory Service's replenishment write path.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: sku
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [warehouseId, qtyAdded]
+              properties:
+                warehouseId: { type: string }
+                qtyAdded: { type: integer, minimum: 1 }
+                reason: { type: string, description: "e.g. stocktake correction, ad hoc supplier delivery — stored in admin_actions.context." }
+      responses:
+        '200':
+          description: >
+            Replenishment applied by Inventory Service. Inventory publishes
+            `InventoryReplenished` (sku, qtyAdded, warehouseId) itself, per
+            its own event contract.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminActionResult' }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim, or lacks a live `inventory-replenishment` grant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: sku or warehouseId not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Inventory Service unavailable (circuit breaker open) — no write happened.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  # ---------------------------------------------------------------------
+  # Admin's own audit trail (read-only). Added beyond requirement-spec.md's
+  # starting-point API Surface table — see header note above.
+  # ---------------------------------------------------------------------
+  /admin/actions:
+    get:
+      operationId: listAdminActions
+      summary: Query Admin's own append-only audit trail (admin_actions).
+      description: >
+        Backs the Observability NFR's "authoritative, sole audit trail"
+        requirement (requirement-spec.md §3, §6 Decision item 3) and the
+        `idx_admin_actions_admin_category` index's stated compliance-review
+        query pattern (database-design.md). Read-only — this table is
+        append-only at the application layer; no write/delete endpoint is
+        exposed over it.
+      security:
+        - bearerAuth: [admin]
+      parameters:
+        - name: adminId
+          in: query
+          required: false
+          schema: { type: string }
+        - name: category
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/GrantCategory' }
+        - name: from
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Matching audit records.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminActionResult' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+        '401':
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller lacks the coarse `Admin` role claim. No fine-grained category check applies to this read-only audit view.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Identity-issued RS256 JWT carrying the `Admin` role claim
+        (kart-identity-service/api-contract.yaml's TokenPair.roles), coarse-
+        validated at the API Gateway before the request reaches Admin
+        Service (BRD §24.1's two-tier enforcement, requirement-spec.md §2).
+        Admin Service performs no separate coarse revocation-list check of
+        its own (edge-cases.md, "Stale Admin Permission Outliving an
+        Identity-Side Revocation") — it trusts the Gateway's per-request
+        revalidation for this layer and adds only its own fine-grained,
+        category-scoped grant check (admin_permission_grants) on top.
+
+  schemas:
+    GrantCategory:
+      type: string
+      description: >
+        The five fixed categories requirement-spec.md §6 Decision item 1
+        and database-design.md's CHECK constraint define — four business
+        categories plus the `permission-management` meta-category.
+      enum:
+        - catalog-management
+        - coupon-issuance
+        - user-suspension
+        - inventory-replenishment
+        - permission-management
+
+    PermissionGrant:
+      type: object
+      description: Mirrors database-design.md's admin_permission_grants row.
+      required: [grantId, principalId, category, grantedAt, grantedBy, version]
+      properties:
+        grantId: { type: string, format: uuid }
+        principalId: { type: string }
+        category: { $ref: '#/components/schemas/GrantCategory' }
+        grantedAt: { type: string, format: date-time }
+        grantedBy: { type: string, description: "Principal id of the granting admin, or 'seed-script' for the one-time bootstrap grant." }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        revokedBy: { type: string, nullable: true }
+        version: { type: integer, description: "Optimistic-concurrency row version (design-decisions.md)." }
+
+    AdminActionResult:
+      type: object
+      description: >
+        Mirrors database-design.md's admin_actions row and the
+        AdminActionPerformed event payload it backs (event-contract.md).
+      required: [actionId, adminId, category, action, entityId, performedAt]
+      properties:
+        actionId: { type: string, format: uuid }
+        adminId: { type: string, description: "Identity-issued principal id of the acting admin. AdminActionPerformed payload field adminId." }
+        category: { $ref: '#/components/schemas/GrantCategory' }
+        action:
+          type: string
+          description: >
+            Specific operation within the category, e.g. product.create,
+            product.deactivate, category.reorder, coupon.create,
+            coupon.deactivate, user.lock, user.unlock, inventory.replenish,
+            grant.issue, grant.revoke (database-design.md). AdminActionPerformed
+            payload field `action`.
+        entityId:
+          type: string
+          description: >
+            Id of the mutated entity in the owning service (or this
+            service's own grant_id for permission-management actions).
+            AdminActionPerformed payload field `entityId`.
+        context:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Optional richer audit detail beyond the three published event fields (database-design.md).
+        performedAt: { type: string, format: date-time }
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set only once the Outbox poller has published AdminActionPerformed for this row (database-design.md).
+
+    ProductWriteRequest:
+      type: object
+      description: >
+        Best-effort mirror of Product Service's own POST /products /
+        PUT /products/{id} request shape — final shape is Product's own
+        API Design Agent's job (see header note).
+      required: [name, categoryId, price]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        categoryId: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        sku: { type: string, description: "Initial variant/SKU identifier, if applicable." }
+
+    CategoryWriteRequest:
+      type: object
+      description: >
+        Best-effort mirror of Category Service's own write API request
+        shape — final shape is Category's own API Design Agent's job
+        (see header note).
+      required: [name]
+      properties:
+        name: { type: string }
+        parentId: { type: string, nullable: true }
+        displayOrder: { type: integer, minimum: 0 }
+
+    CouponWriteRequest:
+      type: object
+      description: >
+        Best-effort mirror of Offer Service's own POST /coupons request
+        shape, using docs/ddd/ubiquitous-language.md's Offer-owned
+        Coupon/CouponCode/RedemptionLimit field names.
+      required: [couponCode, discountValue]
+      properties:
+        couponCode: { type: string }
+        discountValue: { $ref: '#/components/schemas/Money' }
+        perUserCap: { type: integer, nullable: true }
+        globalCap: { type: integer, nullable: true }
+        validFrom: { type: string, format: date-time, nullable: true }
+        validUntil: { type: string, format: date-time, nullable: true }
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
+
+    Problem:
+      type: object
+      description: RFC 7807-style problem details (matches kart-identity-service/api-contract.yaml's Problem convention).
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: permission_denied
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
