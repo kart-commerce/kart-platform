@@ -65,7 +65,7 @@ See [full architecture doc](../services/kart-delivery-tracking-service/architect
 | Outbound (external, not a Kart service) | Per-carrier tracking APIs | Scheduled polling (6h staleness threshold) | Sync (outbound REST) |
 | Outbound | Order (terminal `"delivered"` status only), Notification, Analytics | `DeliveryStatusUpdated` | Async |
 
-No synchronous outbound dependency on any other Kart service. Not a participant in the Order Saga (BRD §12) — Bus fan-out consumer only. Its `DeliveryStatusUpdated` consumer set is corrected here to include Order per [ADR-0005](../adr/0005-unify-order-terminal-event.md) — this service's own `requirement-spec.md` still lists Notification/Analytics only, which predates that ADR. Its largest integration surface (per-carrier webhooks/polling) is external, not a Kart peer, and is not represented as a node in this graph.
+No synchronous outbound dependency on any other Kart service. Not a participant in the Order Saga (BRD §12) — Bus fan-out consumer only. Its `DeliveryStatusUpdated` consumer set includes Order per [ADR-0005](../adr/0005-unify-order-terminal-event.md); this service's own `requirement-spec.md` has since been corrected to match. Its largest integration surface (per-carrier webhooks/polling) is external, not a Kart peer, and is not represented as a node in this graph.
 
 ## kart-payment-service
 

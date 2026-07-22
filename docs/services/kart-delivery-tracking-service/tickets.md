@@ -1,7 +1,7 @@
 ---
 doc_type: tickets
 service: kart-delivery-tracking-service
-status: draft
+status: approved
 generated_by: ticket-agent
 source: [architecture.md, ddd-model.md, api-contract.yaml, database-design.md, event-contract.md, design-decisions.md, requirement-spec.md, edge-cases.md]
 ---
@@ -10,7 +10,7 @@ source: [architecture.md, ddd-model.md, api-contract.yaml, database-design.md, e
 
 Local draft. Not yet created as real GitHub Issues — that requires the target repo to exist (Project Scaffold Agent) and is a separate, explicit step.
 
-**Input-freshness / approval-checkbox flag (carried forward, not blocking):** `requirement-spec.md` and `edge-cases.md` are both `status: approved`, re-verified fresh for this run — every item that was open in an earlier pass (the carrier-webhook ingestion contract, the `200`-vs-`202` `GET /tracking/{id}` response contract, ETA computation, the `ShipmentDispatched` creation-trigger relationship) is now closed, with no stale "Open Question" references remaining and no contradiction between the two documents or with `docs/ddd/ubiquitous-language.md`'s "Owned by `kart-delivery-tracking-service`" table (verified against the current text of both docs before writing this file). `architecture.md`, `ddd-model.md`, `design-decisions.md`, `database-design.md`, and `event-contract.md` all still carry an unchecked sign-off checkbox (frontmatter `status: pending-approval`), but each of those five docs' own header already flags this same situation and proceeds past it, citing `kart-analytics-service`'s pipeline run as precedent; `api-contract.yaml` is already `approved` (no prior published contract to break — first issue). This ticket list follows that same established precedent: it decomposes directly from all five docs' already-decided content, and no open question in any of them blocks right-sizing the work below. Re-confirm against those five once a human checks their sign-off boxes — no substantive rework of this decomposition is expected from that alone.
+**Input-freshness note:** `requirement-spec.md`, `edge-cases.md`, `architecture.md`, `ddd-model.md`, `design-decisions.md`, `database-design.md`, `event-contract.md`, and `api-contract.yaml` are all `status: approved` — every item that was open in an earlier pass (the carrier-webhook ingestion contract, the `200`-vs-`202` `GET /tracking/{id}` response contract, ETA computation, the `ShipmentDispatched` creation-trigger relationship) is closed, with no stale "Open Question" references remaining and no contradiction between any of the eight documents or with `docs/ddd/ubiquitous-language.md`'s "Owned by `kart-delivery-tracking-service`" table. This ticket list decomposes directly from all eight docs' already-decided content.
 
 ## Epic: kart-delivery-tracking-service v1
 

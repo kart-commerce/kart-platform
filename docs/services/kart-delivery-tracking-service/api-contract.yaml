@@ -19,16 +19,10 @@
 #     eventually publish for its terminal successful status — an event-payload concern, not this
 #     REST contract's, but the same enum is reused here for GET's response body; see CanonicalDeliveryStatus)
 #
-# Input-freshness note (same situation already flagged and proceeded past at this stage for
-# kart-analytics-service — see that service's api-contract.yaml header for precedent): ddd-model.md,
-# design-decisions.md, and architecture.md are all still `status: pending-approval` (unchecked human
-# sign-off), but requirement-spec.md and edge-cases.md — the two docs this run was asked to
-# freshly verify — are both `status: approved` with every blocking item resolved, and the three
-# pending-approval docs contain no open questions and are internally consistent with them. This
-# contract is derived directly from that already-decided content (the 200-vs-202 semantic, the
-# CanonicalDeliveryStatus enum, the webhook ingestion contract, the ack/error-code pattern) rather
-# than re-deciding anything upstream. Re-confirm once a human checks those sign-off boxes; no
-# substantive rework of this contract is expected from that alone.
+# Input-freshness note: requirement-spec.md, edge-cases.md, ddd-model.md, design-decisions.md, and
+# architecture.md are all `status: approved` with every blocking item resolved. This contract is
+# derived directly from that already-decided content (the 200-vs-202 semantic, the
+# CanonicalDeliveryStatus enum, the webhook ingestion contract, the ack/error-code pattern).
 #
 # Scope note: this document covers only this service's synchronous REST surface. `ShipmentDispatched`
 # (consumed, aggregate-creation trigger) and `DeliveryStatusUpdated` (published) are RabbitMQ bus
