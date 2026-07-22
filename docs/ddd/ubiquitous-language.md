@@ -137,6 +137,26 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Category | kart-category-service | `Product.categoryId` is a caller-supplied reference only; never independently validated or refreshed against Category |
 | Rating / `ReviewSubmitted` / `ReviewUpdated` | kart-review-service | Consumed only to maintain a denormalized `ratingSummary` projection (ADR-0014); Review owns the canonical rating aggregate |
 
+## Owned by `kart-user-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| UserProfile | A user's addresses, preferences, and a denormalized copy of Identity-owned contact fields; created only by consuming `UserRegistered` | Aggregate root |
+| Address | One entry in a user's address book — identified by `AddressId`, scoped to exactly one `UserProfile`; at most one default per `AddressType` | Entity |
+| AddressType | The `Shipping`/`Billing`/`Other` classification of an Address | Value object |
+| Preferences | The `locale`/`currency`/`notificationOptIn`/`marketingConsent` set, stored as one additive-friendly JSONB value | Value object |
+| ErasureStatus | The `Active`/`Erased` one-directional PII-tombstone state of a UserProfile (ADR-0016) | Value object |
+| UserNotificationPreferenceUpdated | Domain event (formalized here from `kart-notification-service`'s own approved integration-contract resolution): fired when notification opt-in or the app-installed signal changes, translating User's coarse toggle into Notification's own send-time shape | Domain event |
+| UserDataErased | Domain event (ADR-0016): fans the erasure tombstone out to every downstream service holding userId-linked PII | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-user-service` uses it |
+|---|---|---|
+| UserId | kart-identity-service | `UserProfile`'s own identity; never generated here, only consumed from `UserRegistered` |
+| Email / DisplayName | kart-identity-service | Mirrored as a denormalized, eventually-consistent `contactCopy` (ADR-0006); never write-authoritative here |
+| Admin (erasure-request caller) | kart-admin-service | Invokes the erasure-intake endpoint (ADR-0017); never modeled here |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |

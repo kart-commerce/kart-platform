@@ -1,0 +1,339 @@
+# doc_type: api-contract
+# service: kart-user-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-user-service/ddd-model.md (UserProfile aggregate; Address child entity;
+#     Preferences/AddressType/ErasureStatus value objects)
+#   - docs/services/kart-user-service/requirement-spec.md (§2/§5 API Surface starting point; address
+#     book schema; JSONB preferences; erasure-intake endpoint)
+#   - docs/services/kart-user-service/edge-cases.md ("Address write with invalid/unvalidatable
+#     data" — format-only validation, no synchronous geocoding; "Concurrent profile writes" —
+#     last-write-wins, whole-record replace)
+#   - docs/services/kart-user-service/design-decisions.md (last-write-wins concurrency; Outbox
+#     event publication)
+#   - docs/services/kart-user-service/architecture.md (P95<150ms/P99<400ms read budget; Admin as
+#     the erasure-intake caller, ADR-0017)
+#   - docs/adr/0016-user-gdpr-erasure-policy.md, docs/adr/0017-user-erasure-request-intake-caller.md
+#   - docs/services/kart-category-service/api-contract.yaml (clientCredentials security-scheme
+#     convention, reused verbatim for consistency)
+#
+# Idempotency-Key note (api-standards.md): none of these endpoints mutate money-adjacent state, so
+# the mandatory-Idempotency-Key-header rule does not apply. The erasure-intake endpoint is
+# naturally idempotent by construction — a second call against a `userId` already in `Erased` state
+# is a no-op (ddd-model.md: erasure is one-directional), so no client-supplied idempotency key is
+# needed there either.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-user-service API
+  version: 1.0.0
+  description: >
+    Profile, address book, and preference management (BRD §2.1 item 2), plus the internal
+    erasure-request intake surface (ADR-0016/ADR-0017). PostgreSQL is the strongly-consistent
+    write side; MongoDB is the eventually-consistent read projection (requirement-spec.md §3, §7).
+
+servers:
+  - url: https://api.kart.example/users
+    description: >
+      Public API Gateway. Serves every `/v1/users/{userId}` path below to Client/Mobile/Web
+      (requirement-spec §5/§6 item 2 — Gateway-routed like any other client-facing endpoint).
+  - url: https://internal.kart.local/users
+    description: >
+      Internal network segment. Serves `POST /internal/v1/users/{userId}/erasure-requests` —
+      reachable only by Admin Service's client-credentials principal (ADR-0017).
+
+paths:
+  /v1/users/{userId}:
+    get:
+      operationId: getUserProfile
+      summary: Get a user's profile — addresses, preferences, and the denormalized Identity contact copy.
+      description: >
+        Read path. P95 < 150ms, P99 < 400ms (requirement-spec §3), served from the MongoDB
+        projection. May reflect a short propagation window after a just-committed write
+        (edge-cases.md "Stale MongoDB read after PostgreSQL write") — clients are expected to hold
+        a transient "saved, updating..." state rather than treat this as an error (edge-cases.md's
+        chosen resolution).
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The current projected profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '404':
+          description: No `UserProfile` exists for this `userId` (no `UserRegistered` has been consumed for it yet, or the id is invalid).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    patch:
+      operationId: updateUserPreferences
+      summary: Update preferences (locale, currency, notification opt-in, marketing consent) or the app-installed signal.
+      description: >
+        Whole-preferences-object replace, not a field-level merge (edge-cases.md "Concurrent
+        profile writes" — last-write-wins, chosen over field-level merge). Publishes
+        `UserProfileUpdated`; additionally publishes `UserNotificationPreferenceUpdated` when
+        `notificationOptIn` or `appInstalled` is present in the request body (ddd-model.md).
+      security:
+        - clientCredentials: [self]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                preferences: { $ref: '#/components/schemas/Preferences' }
+                appInstalled: { type: boolean }
+      responses:
+        '200':
+          description: Preferences updated; corresponding event(s) published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '404':
+          description: No such `userId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/users/{userId}/addresses:
+    post:
+      operationId: addAddress
+      summary: Add an address to a user's address book.
+      description: >
+        Format-only validation (required-field presence + country-aware postal-code pattern per
+        `countryCode`) — no synchronous geocoding provider on the write path (edge-cases.md
+        "Address write with invalid/unvalidatable data"). Setting `isDefault: true` clears any
+        prior default of the same `type` in the same write (ddd-model.md invariant). Publishes
+        `UserProfileUpdated`.
+      security:
+        - clientCredentials: [self]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressInput'
+      responses:
+        '201':
+          description: Address added; `UserProfileUpdated` published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Address'
+        '400':
+          description: Failed format-only validation (missing required field, or a country-aware postal-code pattern mismatch).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such `userId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/users/{userId}/addresses/{addressId}:
+    patch:
+      operationId: updateAddress
+      summary: Update one address, including its default flag.
+      security:
+        - clientCredentials: [self]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: addressId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressInput'
+      responses:
+        '200':
+          description: Address updated; `UserProfileUpdated` published.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Address'
+        '400':
+          description: Failed format-only validation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          description: No such `userId` or `addressId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    delete:
+      operationId: removeAddress
+      summary: Remove an address from the address book.
+      security:
+        - clientCredentials: [self]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: addressId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Address removed; `UserProfileUpdated` published.
+        '404':
+          description: No such `userId` or `addressId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /internal/v1/users/{userId}/erasure-requests:
+    post:
+      operationId: submitErasureRequest
+      summary: Trigger the GDPR-style PII tombstone workflow for a verified erasure request.
+      description: >
+        Internal-only (ADR-0016/ADR-0017). Caller: Admin Service, via its "compliance/erasure
+        request intake" category (ADR-0017), exercised under the BRD's existing `Support Agent`
+        role. Synchronous confirmation that the tombstone obligation is accepted — not a
+        best-effort fire-and-forget — matching `kart-user-service/architecture.md`'s resolved
+        intake-mechanism decision. Idempotent: a repeat call against an already-`Erased` profile
+        is a no-op `200`, not an error (ddd-model.md — erasure is one-directional).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: >
+            Erasure request accepted; the tombstone write will complete within 30 days of this
+            request (ADR-0016 item 2). `UserDataErased` is published once the tombstone write
+            commits — not synchronously with this response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId: { type: string }
+                  acceptedAt: { type: string, format: date-time }
+        '404':
+          description: No such `userId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            self: "The authenticated user acting on their own profile (Identity-issued JWT, `userId` claim must match the path parameter) — enforced at this service, not just the Gateway"
+            admin: "Admin-scoped service principal (Admin Service calling User's erasure-intake API, per ADR-0017) — Identity-issued, never validated locally"
+
+  schemas:
+    AddressType:
+      type: string
+      enum: [Shipping, Billing, Other]
+
+    Address:
+      type: object
+      required: [addressId, type, line1, city, postalCode, countryCode, isDefault]
+      properties:
+        addressId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/AddressType' }
+        line1: { type: string }
+        line2: { type: string }
+        city: { type: string }
+        region: { type: string }
+        postalCode: { type: string }
+        countryCode: { type: string, example: US }
+        phone: { type: string }
+        isDefault: { type: boolean }
+
+    AddressInput:
+      type: object
+      required: [type, line1, city, postalCode, countryCode]
+      properties:
+        type: { $ref: '#/components/schemas/AddressType' }
+        line1: { type: string }
+        line2: { type: string }
+        city: { type: string }
+        region: { type: string }
+        postalCode: { type: string }
+        countryCode: { type: string }
+        phone: { type: string }
+        isDefault: { type: boolean, default: false }
+
+    NotificationOptIn:
+      type: object
+      properties:
+        email: { type: boolean }
+        sms: { type: boolean }
+        push: { type: boolean }
+
+    Preferences:
+      type: object
+      properties:
+        locale: { type: string, example: en-US }
+        currency: { type: string, example: USD }
+        notificationOptIn: { $ref: '#/components/schemas/NotificationOptIn' }
+        marketingConsent: { type: boolean }
+
+    UserProfileResponse:
+      type: object
+      required: [userId, addresses, preferences]
+      properties:
+        userId: { type: string }
+        email: { type: string, description: Denormalized copy of Identity's login email (ADR-0006) — not write-authoritative here. }
+        displayName: { type: string, description: Denormalized copy of Identity's display name (ADR-0006) — not write-authoritative here. }
+        addresses:
+          type: array
+          items: { $ref: '#/components/schemas/Address' }
+        preferences: { $ref: '#/components/schemas/Preferences' }
+        appInstalled: { type: boolean }
+        lastUpdatedAt: { type: string, format: date-time }
+
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "ADDRESS_VALIDATION_FAILED" }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
