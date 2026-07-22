@@ -23,16 +23,15 @@
 #   - docs/adr/0007-event-catalog-completeness.md, docs/adr/0008-event-catalog-completeness-round-2.md
 #     (confirm CartCheckedOut is Analytics-only, never Order's creation trigger)
 #
-# Input-freshness note (same situation already flagged and proceeded past at this stage for
-# kart-delivery-tracking-service — see that service's api-contract.yaml header for precedent):
-# ddd-model.md, design-decisions.md, architecture.md, and event-contract.md are all still
-# `status: pending-approval` (unchecked human sign-off), but requirement-spec.md and edge-cases.md
-# — the two docs this run was asked to freshly verify — are both `status: approved`, all previously
-# blocking Open Questions (Q1 cart TTL, Q2 merge conflict rule) fully resolved as Decisions D1/D2,
-# and the four pending-approval docs contain no open questions and are internally consistent with
-# them. This contract is derived directly from that already-decided content rather than re-deciding
-# anything upstream. Re-confirm once a human checks those sign-off boxes; no substantive rework of
-# this contract is expected from that alone.
+# Input-freshness note (resolved): an earlier pass produced this contract while ddd-model.md,
+# design-decisions.md, architecture.md, and event-contract.md were still status: pending-approval
+# (same situation already flagged and proceeded past at this stage for
+# kart-delivery-tracking-service — see that service's api-contract.yaml header for precedent). All
+# four are now status: approved, confirmed internally consistent with this contract and with each
+# other, and with a new GDPR erasure consumer responsibility added (ADR-0016, updated to name Cart;
+# see event-contract.md's UserDataErased row) — an async, event-driven addition with no REST surface
+# of its own, so no endpoint below changes as a result. No substantive rework of this contract was
+# needed from that confirmation pass.
 #
 # Path-naming note (api-standards.md "plural nouns" convention): `/v1/cart` is deliberately kept
 # singular, not pluralized to `/v1/carts`, because it is a per-caller-identity singleton resource

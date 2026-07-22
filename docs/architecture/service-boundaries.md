@@ -166,10 +166,11 @@ See [full architecture doc](../services/kart-cart-service/architecture.md).
 |---|---|---|---|
 | Inbound (client) | Client / Checkout UI via API Gateway | `/cart`, `POST /cart/merge` | Sync |
 | Inbound | Inventory | `InventoryReservationFailed` | Async |
+| Inbound | User Service | `UserDataErased` | Async |
 | Outbound | Analytics | `CartCheckedOut` | Async |
 | Outbound (best-effort, fails open) | Product, Inventory | Lazy stock/price validation (gRPC) | Sync |
 
-One synchronous outbound edge only, guarded by timeout + circuit breaker and failing open on breaker-open/timeout — never a hard gate on checkout initiation. Not a participant in the Order Saga (BRD §12); no dependency edge to Order in either direction — `CartCheckedOut` is Analytics-only, and Order's own creation trigger (`POST /orders`) bypasses Cart entirely (ADR-0007).
+One synchronous outbound edge only, guarded by timeout + circuit breaker and failing open on breaker-open/timeout — never a hard gate on checkout initiation. Not a participant in the Order Saga (BRD §12); no dependency edge to Order in either direction — `CartCheckedOut` is Analytics-only, and Order's own creation trigger (`POST /orders`) bypasses Cart entirely (ADR-0007). `UserDataErased` is a new async inbound edge added by this pass — **ADR-0016** was updated to name Cart directly as an expected consumer, closing a gap found during this service's own documentation pass; triggers hard deletion of the erased user's `Cart` row(s) and Redis entry.
 
 ## kart-inventory-service
 

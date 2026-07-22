@@ -128,6 +128,7 @@ graph TB
     UserSvc -. UserNotificationPreferenceUpdated .-> Notification
     UserSvc -. UserDataErased .-> Analytics
     UserSvc -. UserDataErased .-> Wishlist
+    UserSvc -. UserDataErased .-> Cart
     Notification -. NotificationSent .-> Analytics
 ```
 

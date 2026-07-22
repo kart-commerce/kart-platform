@@ -193,7 +193,7 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Term | Owning Context | How `kart-cart-service` uses it |
 |---|---|---|
 | Sku / Product | kart-product-service | `CartLineItem.sku` is a reference only, resolved via a synchronous, fail-open lazy-validation call at checkout time; Cart never owns catalog or price data |
-| UserId | kart-identity-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself |
+| UserId / UserDataErased | kart-identity-service / kart-user-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself. Consuming `UserDataErased` (ADR-0016, updated to name Cart) deletes every Cart owned by that `UserId` — Cart never models the erasure workflow itself, only reacts to it |
 | Order | kart-order-service | `CartCheckedOut` is published for Analytics only; Cart never models Order's own Saga/state machine, and Order's creation trigger (`POST /orders`) bypasses Cart entirely |
 
 ## Owned by `kart-wishlist-service`

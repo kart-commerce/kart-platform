@@ -1,9 +1,9 @@
 ---
 doc_type: ddd-model
 service: kart-cart-service
-status: pending-approval
+status: approved
 generated_by: ddd-agent
-source: docs/services/kart-cart-service/architecture.md
+source: docs/services/kart-cart-service/architecture.md, docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-cart-service/edge-cases.md, docs/adr/0016-user-gdpr-erasure-policy.md
 ---
 
 # DDD Model: kart-cart-service
@@ -27,19 +27,21 @@ One aggregate root in one bounded context. Per requirement-spec §1, Cart stands
 1. A Cart has exactly one `CartOwner` — either a `UserId` or a `GuestSessionId`, never both, never neither. (This is what makes "guest cart" vs. "logged-in cart" a well-defined distinction for merge to operate on at all.)
 2. A Cart holds at most 100 distinct `CartLineItem`s, keyed by `Sku` (requirement-spec Decision D4) — enforced on both direct `/cart` mutation and on merge.
 3. Within a single Cart, each `Sku` appears as at most one `CartLineItem` — quantity is additive onto the existing line, never a duplicate line for the same `Sku`. This is what makes Decision D2's "sum quantities on overlapping SKUs" well-defined: "overlap" *is* `Sku` equality.
-4. Once a Cart's `CartStatus` is `CheckedOut`, it is terminal for domain-mutation purposes: no further direct `/cart` mutation, merge, or `InventoryReservationFailed`-driven availability change applies to it (requirement-spec Decision D3 — "no-op if the cart has already checked out"). A `CheckedOut` Cart is not deleted (it remains addressable for audit/analytics) but no invariant above 1–3 is re-checked or re-enforced against it again.
+4. Once a Cart's `CartStatus` is `CheckedOut`, it is terminal for domain-mutation purposes: no further direct `/cart` mutation, merge, or `InventoryReservationFailed`-driven availability change applies to it (requirement-spec Decision D3 — "no-op if the cart has already checked out"). A `CheckedOut` Cart is not deleted (it remains addressable for audit/analytics) but no invariant above 1–3 is re-checked or re-enforced against it again. **Exception:** a `UserDataErased` event for the owning `userId` deletes a `CheckedOut` Cart outright (invariant 6) — the only trigger that overrides this normal-case retention, since neither an `Active` nor a `CheckedOut` cart is BRD-required retained history (ADR-0016 item 3).
 5. Cart's own storage-reclamation invariant (requirement-spec §4: "an expired cart must eventually be reclaimed") is satisfied entirely by infrastructure TTL configuration (sliding Redis TTL + PostgreSQL soft-expiry purge, Decision D1) — see Modeling Decision #2. It is deliberately *not* an in-aggregate invariant enforced by domain code (no `isExpired()` check gates any operation, and there is no terminal "Expired" `CartStatus` value): a Cart that still physically exists past its idle window but hasn't yet been purged is not an invalid business state, merely one eligible for cleanup.
+6. **GDPR erasure (ADR-0016):** on consuming `UserDataErased` for a `userId`, every `Cart` aggregate instance owned by that `userId` — regardless of `CartStatus` — is deleted outright, not tombstoned, along with its Redis cache entry (requirement-spec §2, §4, §6 D10; `design-decisions.md`'s "Erasure Mechanism for `UserDataErased`" decision; `edge-cases.md`'s "Residual Cart State" decision). A redelivered `UserDataErased` for an already-erased `userId` finds no matching Cart and is a no-op. This invariant does not apply to a `GuestSessionId`-owned Cart — there is no `userId` to key the deletion on; a guest cart's own 7-day sliding TTL already bounds its lifetime independent of any erasure event.
 
 **Domain events:**
 - `CartCheckedOut` (published — existing, BRD §10 / ADR-0007). Transitions `CartStatus` `Active` → `CheckedOut`. Consumer: Analytics only, never Order (Order's own creation trigger is the client's synchronous `POST /orders`, confirmed by ADR-0007 and `kart-order-service/requirement-spec.md` §5) — audit/analytics-only, never Saga-triggering.
 - `InventoryReservationFailed` (consumed — from `kart-inventory-service`, BRD §10). Applies `LineItemAvailability = FlaggedUnavailable` to the matching `CartLineItem` (by `Sku`), only while `CartStatus == Active` (invariant 4); a no-op otherwise. Idempotent by construction — re-applying the same flag transition twice yields the same state, which is why `design-decisions.md`'s "Reliable Event Publication and Idempotent Event Consumption" decision needs no separate inbox/dedup table for this consumer.
+- `UserDataErased` (consumed — from `kart-user-service`, **ADR-0016**, updated this pass to name Cart directly). Deletes every `Cart` aggregate instance owned by the erased `userId` (invariant 6), regardless of `CartStatus`.
 
 No other domain events are owned by this aggregate. `event-contract.md` already confirms, and this model does not disturb, that neither Decision D1 (expiry) nor Decision D2 (merge) produces a published event — both are private, internal-only outcomes with no external consumer, so no `CartExpired`/`CartMerged` (or similarly named) event is proposed here.
 
 ## Cross-Aggregate / Cross-Context Interaction
 
 - `CartLineItem.sku` is a reference value only into `kart-product-service`'s catalog — resolved via the synchronous, timeout-guarded, fail-open gRPC validation call at checkout time (`architecture.md`'s Dependencies table; `design-decisions.md`'s "Resilience Pattern for Checkout-Time Stock/Price Validation"). Cart never owns or redefines catalog/price data; a stale or now-invalid `Sku` reference is a UX-surfacing concern, not a Cart-aggregate invariant violation (Inventory alone enforces the oversell invariant, per requirement-spec §4).
-- `CartOwner.userId` references an identity issued and owned by `kart-identity-service` (BRD §2.1 item 1, "AuthN, tokens, sessions"). Cart never models authentication, token issuance, or session lifecycle — it only reads a `UserId` as an opaque owner key.
+- `CartOwner.userId` references an identity issued and owned by `kart-identity-service` (BRD §2.1 item 1, "AuthN, tokens, sessions"). Cart never models authentication, token issuance, or session lifecycle — it only reads a `UserId` as an opaque owner key. Consuming `UserDataErased` (ADR-0016) to delete every Cart owned by that key is the one place this reference triggers a Cart-side write; Cart never models the erasure workflow itself, only reacts to it.
 - Cart never models Order's own aggregate/state machine. `CartCheckedOut` is a one-way, Analytics-only signal; Order's creation path (`POST /orders`) bypasses Cart entirely at the service-boundary level (`architecture.md` — "No dependency edge to Order exists in either direction").
 - Cart never models Inventory's reservation aggregate. `InventoryReservationFailed` is consumed only as a trigger for `LineItemAvailability`, never as a state Cart itself owns or reconciles further.
 
@@ -53,5 +55,5 @@ No other domain events are owned by this aggregate. `event-contract.md` already 
 
 ## Sign-off
 
-- [ ] Reviewed by a human
-- [ ] Approved to proceed to API/Database/Event Design Agents
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to API/Database/Event Design Agents

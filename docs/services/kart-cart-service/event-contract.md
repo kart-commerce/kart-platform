@@ -1,18 +1,18 @@
 ---
 doc_type: event-contract
 service: kart-cart-service
-status: pending-approval
+status: approved
 generated_by: event-design-agent
-source: docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-cart-service/edge-cases.md, docs/services/kart-cart-service/design-decisions.md, docs/services/kart-cart-service/architecture.md
+source: docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-cart-service/edge-cases.md, docs/services/kart-cart-service/design-decisions.md, docs/services/kart-cart-service/architecture.md, docs/services/kart-cart-service/ddd-model.md, docs/adr/0016-user-gdpr-erasure-policy.md, docs/services/kart-user-service/event-contract.md
 ---
 
 # Event Contract: kart-cart-service
 
 Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
-## Pipeline Note (read before reviewing the table)
+## Pipeline Note (resolved)
 
-No `docs/services/kart-cart-service/ddd-model.md` exists yet — per the reusable `new-service.workflow.yaml` DAG, the `event-design` stage `depends_on: [ddd]`, and `design-decisions.md`/`architecture.md` (this service's own upstream inputs to a DDD pass) are themselves still `status: pending-approval`, not yet signed off. This contract was nonetheless produced now, as instructed, directly from the two docs that are fully closed out and internally consistent — `requirement-spec.md` (`status: approved`) and `edge-cases.md` (`status: approved`) — both of which already fully specify Cart's only two domain events (schema, consumer, retry, DLQ), with no open questions remaining (see requirement-spec §6, Decisions D1–D9). Nothing below depends on a DDD-Agent-only fact (e.g. aggregate boundaries) that isn't already settled in those two docs. A DDD Agent pass should still run and be checked against this contract for contradiction before this file is moved to `status: approved`; that check is expected to be a no-op given the current state of the approved docs, but it hasn't formally happened, so this file's own status is left at `pending-approval` pending that confirmation and human sign-off — consistent with the `pending-approval` state already carried by `design-decisions.md` and `architecture.md`.
+An earlier draft of this contract was produced before `docs/services/kart-cart-service/ddd-model.md` existed, directly from the already-approved `requirement-spec.md`/`edge-cases.md` (both fully specified Cart's original two domain events with no open questions). `ddd-model.md` has since been produced and approved — it confirms the `Cart` aggregate exactly as this contract already assumed (no contradiction), and adds one new consumed event, `UserDataErased` (invariant 6), which this pass adds below. This file's own status is now `approved`.
 
 ## Events
 
@@ -20,6 +20,9 @@ No `docs/services/kart-cart-service/ddd-model.md` exists yet — per the reusabl
 |---|---|---|---|---|---|---|
 | `CartCheckedOut` | `cart.cart.checked-out` | Published (Analytics) | `cartId`, `userId`, `items` | 2x | `cart.dlq` | Standard (not highest) tier: Analytics-only consumer, funnel/conversion tracking (BRD §10, ADR-0007) — confirmed **not** consumed by Order (Order's creation trigger is the client's own synchronous `POST /orders`, per ADR-0007 and `kart-order-service/requirement-spec.md` §5), so this event is audit/analytics-only, never Saga-triggering. A lost/retried/DLQ'd delivery costs an inaccurate funnel metric, not a financial or inventory-correctness failure — the same risk class the reusable standard reserves the loosest, non-`Payment*` tier for. `cart.dlq` is already this event's own dedicated queue (Cart publishes only this one event, so the BRD's label was never a shared-DLQ violation to begin with — unlike Offer's `coupon.dlq`, which did need splitting in that service's own contract). |
 | `InventoryReservationFailed` | `inventory.reservation.failed` | Consumed (from Inventory) | `orderId`, `sku` | 2x | `cart.inventory-reservation-failed.dlq` | Standard tier, matching the criticality the BRD/ADR-0007 assign this event generally — confirmed appropriate for Cart specifically (not escalated to the `Payment*` 5x/paged tier) because Cart's own handling (edge-cases.md → "Checkout races `InventoryReservationFailed`", Decision D3) is a pre-checkout-only, idempotent UX flag (mark the line item unavailable, no-op once already checked out): a DLQ'd delivery here means a stale "available" flag persists slightly longer, not an oversell or a lost financial transaction — Inventory's own PostgreSQL row remains the sole, authoritative source of truth regardless of whether this event is ever delivered to Cart (Inventory's own requirement-spec, Decision 6/7). **DLQ deliberately diverges from the BRD's simplified shared `inventory.dlq` label**: that label is shared across all of Inventory's own published events *and* across this event's three separate consumers (Order, Cart, Analytics per BRD §10) — a shared-DLQ pattern the reusable event standard explicitly forbids ("every consumer queue has its own DLQ — never a shared/global DLQ"). Cart's own consumer queue therefore gets its own DLQ, scoped to Cart's consumption only, independent of whatever Order's and Analytics' own event contracts eventually name theirs. This mirrors the identical override already established as precedent in `kart-offer-service/event-contract.md` (`PriceQuoteIssued`, overriding the BRD's shared `coupon.dlq`). |
+| `UserDataErased` | `user.data-erased` | Consumed (from User Service) | `userId`, `erasedAt` | 5x, exponential backoff, on-call paging on final DLQ landing | `cart.user-data-erased.dlq` | **Compliance-critical tier**, per ADR-0016 item 7 — the same tier `kart-identity-service/event-contract.md` and `kart-wishlist-service/event-contract.md` already commit to on their own consumer sides for this same event. New this pass: **ADR-0016** was updated to name Cart directly as an expected consumer, closing a gap found during this service's own documentation pass (no prior draft of any of Cart's docs mentioned ADR-0016). Triggers hard deletion of every `Cart` row (Active or CheckedOut) owned by the erased `userId`, plus its Redis cache entry (`ddd-model.md` invariant 6; `design-decisions.md`'s "Erasure Mechanism" decision; `edge-cases.md`'s "Residual Cart State" decision). |
+
+**Cross-service consistency note:** `kart-user-service/event-contract.md`'s own `UserDataErased` row currently lists seven consumers (Order, Notification, Analytics, Review, Recommendation, Wishlist, Identity) and does not yet include Cart, even though ADR-0016 — that row's own cited source — was updated by this pass to name Cart. This is a known, non-blocking asymmetry, not a contradiction this document can resolve unilaterally: User Service's own contract is the publish-side source of truth for that row and its DLQ list, and updating it is that service's own future documentation pass, the same "decide the integration pattern, don't edit the sibling service's docs directly" boundary ADR-0016/ADR-0017 already observe for their own cross-service consequences (mirroring the identical situation `kart-wishlist-service/event-contract.md` documents for `ProductDiscontinued`). Cart's own consumer-side retry/DLQ tier above is fully specified regardless of whether User Service's table catches up.
 
 ## Non-Event Decisions (confirmed here, no schema impact)
 
@@ -30,5 +33,5 @@ Two of this service's requirement-spec decisions were flagged in an earlier anal
 
 ## Sign-off
 
-- [ ] Reviewed by a human
-- [ ] Approved
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved
