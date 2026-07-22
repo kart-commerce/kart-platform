@@ -157,6 +157,25 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Email / DisplayName | kart-identity-service | Mirrored as a denormalized, eventually-consistent `contactCopy` (ADR-0006); never write-authoritative here |
 | Admin (erasure-request caller) | kart-admin-service | Invokes the erasure-intake endpoint (ADR-0017); never modeled here |
 
+## Owned by `kart-search-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| SearchDocument | The per-SKU, query-side projection `/search` ranks and returns; a denormalized, foreign-fed copy of catalog/rating/category data with no write-side counterpart of its own | Aggregate root |
+| RatingSignal | `{ avg, count, perReviewRatings }` — this service's own ranking-signal projection of Review's canonical rating aggregate, recomputed deterministically from a per-`reviewId` map for idempotency under at-least-once redelivery (`ddd-model.md`) | Value object |
+| CategoryLookup | The `categoryId → categoryName` reference entry this service maintains independently by consuming `CategoryUpdated` directly from `kart-category-service`, rather than relaying a copy through Product (which has no such column) | Aggregate root |
+| Availability | The `Active`/`Discontinued` soft-remove state a `SearchDocument` mirrors one-directionally from Product's `VariantStatus`; `Discontinued` excludes a document from default `/search` results without deleting it | Value object |
+| FacetableAttributes | The `{ size, color, extendedAttributes }` shape mirrored unchanged from Product's `ProductAttributes`; `extendedAttributes.sponsored` is read here for ranking purposes only, never redefined as this service's own attribute | Value object |
+| RankingProfile | The query-time scoring policy (weighted blend of normalized text relevance, rating, in-stock status, and a capped sponsored boost) applied identically to every `/search` request; not a per-document stored field | Value object |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-search-service` uses it |
+|---|---|---|
+| Sku / Product / Variant / ProductAttributes | kart-product-service | Every catalog field on `SearchDocument` is sourced from Product's own events (`ProductCreated`/`ProductPriceChanged`/`ProductUpdated`/`ProductDiscontinued`, enriched by [ADR-0018](../adr/0018-search-catalog-signal-sourcing.md)); this service never models Product's own aggregate boundary or write-side schema |
+| CategoryId | kart-category-service | `CategoryLookup.categoryId` references Category's own identifier; this service never models Category's taxonomy hierarchy |
+| Rating / ReviewSubmitted / ReviewUpdated | kart-review-service | `RatingSignal` is a denormalized projection of Review's canonical rating aggregate (ADR-0014); this service never models Review's moderation workflow |
+
 ## Owned by `kart-cart-service`
 
 | Term | Definition | Kind |

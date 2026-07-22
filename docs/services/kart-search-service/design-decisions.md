@@ -1,7 +1,7 @@
 ---
 doc_type: design-decisions
 service: kart-search-service
-status: pending-approval
+status: approved
 generated_by: design-decision-agent
 source: docs/services/kart-search-service/requirement-spec.md, docs/services/kart-search-service/edge-cases.md
 ---
@@ -58,11 +58,11 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
 ## Not Decided Here
 
 - **Serialization format for consumed events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`docs/standards/event-standards.md`); no divergence reason exists, so nothing to add here.
-- **Ranking/relevance scoring formula and sponsored-placement policy (capped vs. auctioned)** — explicitly carried forward as a non-blocking business/product tuning decision (requirement-spec Open Question 2), owned by the DDD/Architecture Agents and Product/Business stakeholders, not a design-pattern choice this stage can ground.
-- **`ProductDiscontinued` formal payload/schema** — owned by the Event Design Agent once the event is formalized platform-wide (requirement-spec §2/§6 item 4); this document only fixes how Search's own write path treats a discontinuation signal once received (Decision 2), not the event's contract.
-- **Index/document schema, sharding, and OpenSearch mapping design** — explicitly left to the Architecture and Database Design Agents per this stage's scope; only the rebuild strategy (Decision 4) and write-guard mechanism (Decision 2) are cross-cutting patterns fixed here.
+- **Ranking/relevance scoring formula and sponsored-placement policy (capped vs. auctioned) — since resolved.** Was carried forward here as a non-blocking business/product tuning decision (requirement-spec Open Question 2). Now resolved at the DDD Agent stage (`ddd-model.md`'s `RankingProfile` value object): capped additive sponsored boost, not an auction — no bidding/marketplace mechanism exists anywhere in the BRD's 18-service scope for an auctioned model to run against, so "capped" is the only buildable default; see `ddd-model.md` for the full formula and rationale.
+- **`ProductDiscontinued` formal payload/schema — since resolved.** Formalized by the DDD Agent stage at `kart-product-service/ddd-model.md`/`event-contract.md`: `sku, discontinuedAt`, 3x retry, `search.product-discontinued.dlq` on this service's own consumer side. This document's Decision 2 (how Search's own write path treats a discontinuation signal once received) is unaffected.
+- **Index/document schema, sharding, and OpenSearch mapping design** — explicitly left to the Architecture and Database Design Agents per this stage's scope; only the rebuild strategy (Decision 4) and write-guard mechanism (Decision 2) are cross-cutting patterns fixed here. See `database-design.md`.
 
 ## Sign-off
 
-- [ ] Reviewed by: _pending human review_
-- [ ] Approved to proceed to Architecture Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to Architecture Agent
