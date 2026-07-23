@@ -281,3 +281,35 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Order / `OrderId` | kart-order-service | `Shipment.orderId` is a reference field only, and the natural unique business key `Shipment` is keyed on; Shipping never models Order's own Saga/state machine |
 | OrderConfirmed | kart-order-service | Consumed as the sole shipment-creation trigger (payload `orderId, address`); Shipping never models Order's own confirmation logic, only reacts to it |
 | TrackingId | kart-delivery-tracking-service | Shipping is the value's origin (captured from the carrier's label-generation response and first published on `ShipmentDispatched`), but does not re-claim the term's glossary ownership from Tracking's own existing, already-approved entry — flagged explicitly in `ddd-model.md` Modeling Decision #5 as a known naming/ownership asymmetry, not silently worked around |
+
+## Owned by `kart-notification-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| NotificationAttempt | One channel-specific send attempt derived from a single consumed triggering event; the `(eventId, channel)` idempotency/audit boundary — the DB unique constraint on this key *is* the idempotency mechanism, not a pre-check (ADR-0003's resolved consumed-event scope) | Aggregate root |
+| NotificationAttemptKey | `{eventId, channel}` — the DB-unique-constraint-enforced idempotency key `NotificationAttempt` is identified by | Value object |
+| Channel | `Email \| SMS \| Push` — the delivery channel a `NotificationAttempt` targets | Value object |
+| TriggeringEventType | The name of the consumed event that caused a `NotificationAttempt` to exist (e.g. `OrderConfirmed`, `PaymentFailed`) — reference-only, never redefining the producing service's own event | Value object |
+| CriticalityTier | `Tier1` (5 attempts + paged) / `Tier2` (3 attempts) / `Tier3` (2 attempts) retry budget, snapshotted onto a `NotificationAttempt` at creation from `TriggeringEventType`, inherited verbatim from the triggering event's own already-catalogued tier | Value object |
+| NotificationCategory | The per-category classification (order-updates, payment, shipping, marketing/price-alerts, account) a `NotificationAttempt`'s opt-out check runs against | Value object |
+| DeliveryOutcome | `Pending \| Sent \| Failed \| Suppressed` — the monotonic, terminal outcome state of a `NotificationAttempt` | Value object |
+| AttemptCount | The number of physical delivery tries made against a `NotificationAttempt`'s `CriticalityTier` retry ceiling | Value object |
+| NotificationPreference | The local, eventually-consistent per-user opt-out/reachability projection, populated solely by consuming `UserNotificationPreferenceUpdated` (owned by `kart-user-service`) | Aggregate root |
+| OptOutMatrix | The full `{channel -> {category -> optedOut}}` map on a `NotificationPreference`, replaced wholesale on every consumed update, never partially patched | Value object |
+| AppInstalled | The boolean push-reachability flag on a `NotificationPreference` | Value object |
+| OrderUserIndex | Lookup projection (`orderId -> userId`), seeded solely from consuming `OrderCreated`; resolves `userId` for the seven consumed events that carry `orderId` but not `userId` (ADR-0020) — not an aggregate, no invariants beyond upsert-on-consume | Value object |
+| TrackingOrderIndex | Lookup projection (`trackingId -> orderId`), seeded solely from consuming `ShipmentDispatched`; chains `DeliveryStatusUpdated`'s `trackingId` to `OrderUserIndex` for the one consumed event carrying neither `userId` nor `orderId` (ADR-0020) | Value object |
+| NotificationSent | Domain event (existing BRD event, §10; previously unclaimed in the glossary, formally owned here): fired exactly once per terminal `NotificationAttempt`, carrying `userId, channel, status`; 1x fire-and-forget, consumed by Analytics only | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-notification-service` uses it |
+|---|---|---|
+| UserId | kart-identity-service | `NotificationAttempt.userId` and `NotificationPreference.userId` are reference fields only; Notification never models Identity's own account/credential aggregate |
+| OrderCreated / OrderConfirmed / OrderCancelled / OrderCompensationTriggered / OrderDelivered | kart-order-service | Consumed only as `NotificationAttempt` creation triggers; `OrderCreated` additionally seeds `OrderUserIndex` (ADR-0020) — Notification never models Order's own Saga/state machine |
+| PaymentCompleted / PaymentFailed / RefundIssued | kart-payment-service | Consumed only as `NotificationAttempt` creation triggers (Tier 1); Notification never models Payment's own charge/refund/dispute state machine |
+| ShipmentDispatched | kart-shipping-service | Consumed as a `NotificationAttempt` creation trigger and, additionally, seeds `TrackingOrderIndex` (ADR-0020); Notification never models Shipping's own carrier/label aggregate |
+| DeliveryStatusUpdated | kart-delivery-tracking-service | Consumed only as a `NotificationAttempt` creation trigger, resolved via `TrackingOrderIndex` -> `OrderUserIndex` (ADR-0020); Notification never models Tracking's own status-history/dedup aggregates |
+| WishlistPriceAlertTriggered | kart-wishlist-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 3); Notification never models Wishlist's own `WishlistEntry` aggregate |
+| UserRegistered | kart-identity-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 2, welcome email); independently also consumed by `kart-user-service`, no ordering dependency between the two consumers |
+| UserNotificationPreferenceUpdated | kart-user-service | Consumed only as the sole `NotificationPreference` creation/update trigger; Notification never models User's own coarse `notificationOptIn` field or `UserProfile` aggregate |
