@@ -261,3 +261,23 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | PaymentIntent / `paymentIntentId` | kart-payment-service | Referenced only via `PaymentCompleted`/`PaymentFailed`/`ChargebackReceived` payloads and the `POST /payments/{id}/refund` call; Order never models Payment's own charge/refund/dispute state machine |
 | Shipment / `ShipmentDispatched` / `ShipmentCreationFailed` | kart-shipping-service | Consumed only as status signals (dispatch confirmation, terminal fulfillment failure); Order never models Shipping's own carrier/label aggregate |
 | TrackingRecord / `DeliveryStatusUpdated` | kart-delivery-tracking-service | Consumed only for its terminal "delivered" status value; Order never models Delivery Tracking's own tracking-history aggregate |
+
+## Owned by `kart-shipping-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Shipment | The single authoritative record of one order's fulfillment attempt — carrier selection through label generation; created only by consuming `OrderConfirmed`, unique per `orderId` (at most one `Shipment` per `Order`) | Aggregate root |
+| ShipmentStatus | The `Pending \| Dispatched \| Failed` state machine a `Shipment` moves through; `Pending` is the only non-terminal value, entered when the shipment-intent row commits, resolved out-of-band once the carrier interaction completes — monotonic, no transition out of either terminal value | Value object |
+| Carrier | The carrier that actually produced a valid label for a `Shipment`; nullable until `Dispatched`, set exactly once by the carrier attempt that succeeds — the `carrier` field on `ShipmentDispatched`'s payload. Distinct from `kart-delivery-tracking-service`'s own `CarrierId` (a webhook-routing/adapter concern), not a re-owned or renamed version of it | Value object |
+| CarrierSelectionPolicy | The ordered, externally-configured carrier priority list (primary, then secondary on the primary's circuit tripping) a shipment's carrier-selection attempt walks through; deliberately not a computed cheapest/fastest/contracted-rate business rule, since the BRD gives no such criteria (`ddd-model.md` Modeling Decision #2) | Value object |
+| FailureReason | The nullable reason a `Shipment` reaches `Failed` — set once all configured carrier options are exhausted (address-validation failure or no carrier services the destination); the `reason` field on `ShipmentCreationFailed`'s payload | Value object |
+| ShipmentDispatched | Domain event: fired exactly once when a `Shipment` reaches `Dispatched`, carrying `orderId, carrier, trackingId`; consumed by Order, Notification, Delivery Tracking, Analytics | Domain event |
+| ShipmentCreationFailed | Domain event (ADR-0015, new — not previously named in the BRD): fired exactly once when a `Shipment` reaches `Failed`, carrying `orderId, reason`; consumed by Order, Notification, Analytics | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-shipping-service` uses it |
+|---|---|---|
+| Order / `OrderId` | kart-order-service | `Shipment.orderId` is a reference field only, and the natural unique business key `Shipment` is keyed on; Shipping never models Order's own Saga/state machine |
+| OrderConfirmed | kart-order-service | Consumed as the sole shipment-creation trigger (payload `orderId, address`); Shipping never models Order's own confirmation logic, only reacts to it |
+| TrackingId | kart-delivery-tracking-service | Shipping is the value's origin (captured from the carrier's label-generation response and first published on `ShipmentDispatched`), but does not re-claim the term's glossary ownership from Tracking's own existing, already-approved entry — flagged explicitly in `ddd-model.md` Modeling Decision #5 as a known naming/ownership asymmetry, not silently worked around |

@@ -1,0 +1,305 @@
+# doc_type: api-contract
+# service: kart-shipping-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source: docs/services/kart-shipping-service/ddd-model.md, docs/services/kart-shipping-service/architecture.md,
+#   docs/services/kart-shipping-service/design-decisions.md, docs/services/kart-shipping-service/requirement-spec.md,
+#   docs/standards/api-standards.md, docs/standards/kart-conventions.md (API Versioning section),
+#   docs/adr/0002-order-shipping-async-integration.md, docs/adr/0015-shipping-shipment-creation-failed-event.md,
+#   docs/adr/0010-admin-service-scope-and-integration.md
+#
+# Every service starts at /v1 (kart-conventions.md). Idempotency-Key is mandatory on the one
+# mutating endpoint here (POST /v1/shipments) per api-standards.md and this service's own
+# "at most one Shipment per Order" invariant (ddd-model.md) — not a money-moving write, but a
+# non-retry-safe one (a duplicate, billable carrier label), which api-standards.md's mandate
+# is stated to cover ("payments, refunds, and other non-retry-safe writes"). Publishing a
+# stable copy to a shared-contracts repo (kart-shared) is deferred until that repo exists in
+# this pipeline's scope.
+#
+# Per ADR-0002, this service has NO synchronous inbound endpoint that Order calls to create a
+# shipment — the sole shipment-creation trigger is the `OrderConfirmed` consumer (event-contract.md,
+# out of this file's scope). The only REST surface this contract defines is the internal/
+# administrative `/shipments` resource requirement-spec §5 named but left unresolved
+# ("query and/or manual shipment creation... final shape is the API Design Agent's job") and
+# architecture.md explicitly deferred ("Whether it's exposed via the API Gateway to
+# kart-admin-service/ops staff, called service-to-service, or dropped entirely is left to the
+# API Design Agent").
+#
+# Resolution reached at this stage: this is NOT modeled as a kart-admin-service `/admin/*`
+# operation. ADR-0010 fixes Admin Service's back-office operation set as a closed enumeration
+# for v1 — catalog management, coupon issuance, user suspension, inventory replenishment (and,
+# per kart-admin-service/api-contract.yaml, its own local permission-management) — and shipment
+# query/manual-creation is not one of those five categories, nor named anywhere in
+# kart-admin-service's own requirement-spec/architecture/api-contract.yaml. Silently routing this
+# through Admin would extend ADR-0010's closed table without the ADR amendment that decision
+# explicitly requires ("a new, explicit extension to this table — not a silent expansion").
+# Instead, `/v1/shipments` is exposed only on Shipping's own internal network segment, gated by
+# a dedicated ops-tooling service-principal scope — reachable by whatever internal ops/support
+# console the platform runs, service-to-service, without going through kart-admin-service's RBAC
+# or its `/admin/*` surface. If a future product decision wants this under Admin's umbrella
+# instead, that is a new explicit ADR-0010 table extension to raise, not something this contract
+# should decide unilaterally.
+#
+# POST /v1/shipments is deliberately narrow: it creates a Shipment only where none yet exists
+# for the given orderId (the same pre-carrier-call existence check and unique-constraint-on-
+# order_id the OrderConfirmed consumer itself enforces — ddd-model.md's Uniqueness and Idempotent
+# Event Consumption invariants, "in any status, including still-Pending"). It is explicitly NOT a
+# retry/reopen path for an already-Failed shipment: ddd-model.md's Modeling Decision #7 states the
+# aggregate's only legal transitions are `Pending -> {Dispatched, Failed}`, both terminal, and
+# "no automatic Failed -> Dispatched retry transition of its own" is modeled — building one here
+# would invent an aggregate transition the DDD stage deliberately did not model. A Failed
+# shipment's resolution (manual ops retry as a genuinely new attempt, address correction,
+# cancellation) is flagged as open — see the note on POST /v1/shipments's 409 response below —
+# not silently worked around in this contract.
+
+openapi: 3.0.3
+info:
+  title: kart-shipping-service API
+  version: 1.0.0
+  description: >
+    Internal/administrative surface only. Shipment creation in the normal flow is entirely
+    event-driven (OrderConfirmed consumption, ADR-0002) and has no REST representation in this
+    file — see event-contract.md. This contract covers only the query and narrowly-scoped
+    manual-creation surface requirement-spec §5 named as `/shipments` and left for this stage
+    to shape.
+
+servers:
+  - url: https://internal.kart.local/shipping
+    description: >
+      Internal network segment only — never exposed via the public API Gateway (no BRD-stated
+      customer-facing use case for this service's REST surface). Reachable by internal ops/
+      support tooling's service principal. Deliberately not proxied through kart-admin-service
+      (see header note on ADR-0010's closed operation enumeration).
+
+paths:
+  /v1/shipments:
+    get:
+      operationId: listShipments
+      summary: Query shipments — primarily for ops triage of stuck/Failed shipments.
+      description: >
+        Not a BRD-stated endpoint by shape — added as this stage's resolution of requirement-
+        spec §5's "query" option. Served directly from this service's own PostgreSQL store
+        (ddd-model.md; no read-model projection exists or is needed, mirroring
+        kart-payment-service's GET /v1/payments/{id} rationale). Primary ops use case: filter
+        `status=Failed` to find shipments needing manual reconciliation (ddd-model.md's "a
+        shipment that can never be created must still reach a terminal, signaled state"
+        invariant — this is how ops actually sees that signal beyond the ShipmentCreationFailed
+        event's own consumers).
+      security:
+        - opsPrincipal: [shipments-read]
+      parameters:
+        - name: orderId
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter to the single Shipment for this order, if any (ddd-model.md's uniqueness invariant means at most one result).
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [Pending, Dispatched, Failed] }
+        - name: carrier
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by the carrier that fulfilled the shipment. No effect on still-Pending rows (carrier is nullable until Dispatched).
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque pagination cursor from a previous response's nextCursor.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ShipmentView' }
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          description: Missing or invalid ops-tooling service-principal credential.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    post:
+      operationId: createShipmentManually
+      summary: Manually create a Shipment for an order that has none yet. Internal ops use only.
+      description: >
+        Resolution of requirement-spec §5's "manual shipment creation" option — for the narrow
+        case where `OrderConfirmed` was never consumed for a genuinely-confirmed order (e.g. an
+        upstream publish gap) and ops needs to trigger the same creation path directly, without
+        waiting on a republished event. This endpoint runs through the exact same code path and
+        invariants as the `OrderConfirmed` consumer (ddd-model.md's Modeling Decision #8: "a
+        second access path onto one aggregate, not a second bounded-context concept") — same
+        pre-carrier-call existence check, same unique constraint on `order_id`, same Transactional
+        Outbox handoff to the out-of-band carrier call (design-decisions.md). `ShipmentDispatched`
+        or `ShipmentCreationFailed` publishes later, exactly as it would from the event-driven
+        path — this endpoint's response reflects only the initial `Pending` acceptance, not the
+        carrier outcome.
+      security:
+        - opsPrincipal: [shipments-write]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            Platform-standard replay-safety header (api-standards.md). Distinct from, and in
+            addition to, the `orderId`-keyed uniqueness invariant below — a retried call with the
+            same Idempotency-Key returns the original acceptance response rather than
+            re-running the existence check a second time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, address]
+              properties:
+                orderId: { type: string, description: "kart-order-service's OrderId — reference field only, per ddd-model.md." }
+                address: { $ref: '#/components/schemas/Address' }
+      responses:
+        '202':
+          description: >
+            Shipment intent accepted and persisted (status=Pending) in the same transaction as
+            its Outbox marker (design-decisions.md's Transactional Outbox decision); the carrier
+            call itself happens out-of-band. `ShipmentDispatched`/`ShipmentCreationFailed`
+            publishes once that resolves — poll GET /v1/shipments/{id} or consume those events
+            to observe the terminal outcome.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShipmentView' }
+        '409':
+          description: >
+            A Shipment already exists for this `orderId`, in any status — including a terminal
+            `Failed` row (ddd-model.md's Uniqueness and Idempotent Event Consumption invariants:
+            "in any status, including still-Pending"; Modeling Decision #7 models no
+            `Failed -> Pending` reopen transition). This is a deliberate, flagged gap, not an
+            oversight: resolving an already-Failed shipment (manual ops retry as a genuinely new
+            attempt, address correction, or cancellation) has no endpoint in this contract,
+            because the DDD stage did not model a transition for it. Carried forward as an open
+            question for a future pass — either a new aggregate transition, or a documented
+            manual-remediation runbook outside this API — not silently worked around here.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: "Same Idempotency-Key reused with a materially different request body."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: Missing or invalid ops-tooling service-principal credential.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/shipments/{id}:
+    get:
+      operationId: getShipment
+      summary: Read a single Shipment's current state by ShipmentId.
+      security:
+        - opsPrincipal: [shipments-read]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShipmentView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: Missing or invalid ops-tooling service-principal credential.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    opsPrincipal:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            shipments-read: >
+              Internal ops/support tooling, read-only access to Shipment state for triage. Not
+              an Identity-issued customer/Admin-Service-RBAC role — a dedicated internal
+              service-principal scope, deliberately separate from kart-admin-service's own
+              five-category permission model (ADR-0010) since shipment operations are not in
+              that closed enumeration.
+            shipments-write: >
+              Internal ops/support tooling, manual shipment-creation access (POST /v1/shipments
+              only). Granted narrowly and audited outside this contract's scope — this endpoint
+              performs a real, billable carrier call if it succeeds.
+
+  schemas:
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    Address:
+      type: object
+      required: [line1, city, postalCode, country]
+      properties:
+        line1: { type: string }
+        line2: { type: string, nullable: true }
+        city: { type: string }
+        state: { type: string, nullable: true }
+        postalCode: { type: string }
+        country: { type: string, example: US }
+
+    ShipmentView:
+      type: object
+      required: [shipmentId, orderId, status, createdAt]
+      properties:
+        shipmentId: { type: string, format: uuid }
+        orderId: { type: string }
+        status:
+          type: string
+          enum: [Pending, Dispatched, Failed]
+          description: >
+            ddd-model.md's ShipmentStatus value object — Pending is the only non-terminal
+            value; Dispatched/Failed are both terminal and mutually exclusive (Modeling
+            Decision #7). The full legal-transition graph is documented there, not re-derived
+            here.
+        carrier:
+          type: string
+          nullable: true
+          description: Set exactly once, only when status = Dispatched (ddd-model.md's Carrier value object).
+        trackingId:
+          type: string
+          nullable: true
+          description: >
+            Carrier-issued tracking identifier, set exactly once alongside carrier when status =
+            Dispatched. Same value kart-delivery-tracking-service's own TrackingId treats as
+            "first seen in ShipmentDispatched's payload" (docs/ddd/ubiquitous-language.md) — this
+            field is a read-only projection of that fact, not a re-claim of the term's glossary
+            ownership (ddd-model.md's Modeling Decision #5).
+        failureReason:
+          type: string
+          nullable: true
+          description: Set exactly once, only when status = Failed (ddd-model.md's FailureReason value object; ADR-0015).
+        createdAt: { type: string, format: date-time }
+        dispatchedAt: { type: string, format: date-time, nullable: true }
+        failedAt: { type: string, format: date-time, nullable: true }
