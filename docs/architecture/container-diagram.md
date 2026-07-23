@@ -22,11 +22,13 @@ graph TB
     GW --> DeliveryTracking[kart-delivery-tracking-service<br/>Carrier tracking + ETA]
     GW --> Category[kart-category-service<br/>Taxonomy + hierarchy + navigation]
     GW --> Wishlist[kart-wishlist-service<br/>Saved items + Price-Drop Alerts]
+    GW -->|"sync REST: POST /orders, GET /orders/{id}, POST /orders/{id}/cancel"| Order
     Support[Support/Admin Console] --> GW
     GW -->|"sync REST: POST /payments/charge (secondary path — see below), POST /payments/{id}/refund (support-agent driven, BRD §22)"| Payment
 
+    Order[kart-order-service<br/>Order lifecycle + Saga orchestrator]
     Product[Product Service] -. ProductPriceChanged .-> Offer
-    Order[Order Service] -. OrderCancelled .-> Offer
+    Order -. OrderCancelled .-> Offer
     Offer -. CouponRedeemed .-> Order
     Offer -. CouponRedeemed .-> Analytics[kart-analytics-service<br/>Event ingestion + dashboards/funnels]
     Offer -. PriceQuoteIssued .-> Analytics
@@ -116,6 +118,7 @@ graph TB
     Admin -->|"sync REST, coupon issuance, POST /coupons"| Offer
     Admin -->|"sync REST, user suspension, lock/unlock"| Identity
     Admin -->|"sync REST, inventory replenishment"| Inventory
+    Admin -->|"sync REST, POST /orders/{id}/resolve-fulfillment-exception"| Order
     Admin -. AdminActionPerformed .-> Analytics
 
     Order -. "OrderCreated/Confirmed/Cancelled/CompensationTriggered/Delivered" .-> Notification
@@ -133,4 +136,4 @@ graph TB
     Notification -. NotificationSent .-> Analytics
 ```
 
-_Placed so far: `kart-offer-service`, `kart-review-service`, `kart-cart-service`, `kart-notification-service`, `kart-inventory-service`, `kart-recommendation-service`, `kart-admin-service`, `kart-payment-service`, `kart-category-service`, `kart-shipping-service`, `kart-delivery-tracking-service`, `kart-product-service`, `kart-wishlist-service`, `kart-identity-service`, `kart-user-service`, `kart-search-service`, `kart-analytics-service` — this note was stale (missing the last six) until corrected during `kart-analytics-service`'s own Architecture Agent pass; this diagram grows as each subsequent service goes through the Architecture Agent. Only `kart-order-service` has not yet passed through this stage. `CarrierWebhook`/`CarrierAPI` are external, non-Kart systems (per-carrier third parties), not bounded contexts of this platform — shown only because they are Delivery Tracking's largest integration surface._
+_Placed so far: `kart-offer-service`, `kart-review-service`, `kart-cart-service`, `kart-notification-service`, `kart-inventory-service`, `kart-recommendation-service`, `kart-admin-service`, `kart-payment-service`, `kart-category-service`, `kart-shipping-service`, `kart-delivery-tracking-service`, `kart-product-service`, `kart-wishlist-service`, `kart-identity-service`, `kart-user-service`, `kart-search-service`, `kart-analytics-service`, and now `kart-order-service` (this pass) — the last service on the platform to pass through this stage; every edge Payment's, Inventory's, Shipping's, Offer's, and Delivery Tracking's own Architecture Agent passes had already anticipated from their own side is now formalized here from Order's side too, plus the new Admin→Order `resolve-fulfillment-exception` edge (ADR-0015). This diagram is now complete for all 18 deployable service repos. `CarrierWebhook`/`CarrierAPI` are external, non-Kart systems (per-carrier third parties), not bounded contexts of this platform — shown only because they are Delivery Tracking's largest integration surface._

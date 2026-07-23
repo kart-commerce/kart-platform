@@ -236,3 +236,28 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Sku / Variant / ProductDiscontinued | kart-product-service | `WishlistEntry.sku` is a reference only; `ProductDiscontinued` (consumed) transitions a WishlistEntry to `Stale`, never redefined locally |
 | UserId / UserDataErased | kart-user-service / kart-identity-service | `WishlistEntry.userId` is an opaque reference; consuming `UserDataErased` (ADR-0016) deletes every WishlistEntry for that `userId` — Wishlist never models identity or erasure workflow beyond reacting to this event |
 | InventoryReservationFailed | kart-inventory-service | Consumed only to flag a `CartLineItem`'s availability pre-checkout; Cart never models Inventory's own reservation aggregate |
+
+## Owned by `kart-order-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Order | The single authoritative record of an order's lifecycle/Saga state — the platform's sole Saga orchestrator (BRD §5.1); no other service or in-memory process manager is ever more authoritative | Aggregate root |
+| OrderLineItem | One `(sku, qty, unitPrice)` line within an Order, created and persisted only alongside its parent — no per-item shipment state (no split-shipment support, requirement-spec Open Question resolution #4) | Entity |
+| OrderEvent | An append-only row per state transition, doubling as both the audit trail and the Outbox relay row (`order_events` doubles as the Outbox table, requirement-spec Open Question resolution #5); carries `OrderEventSequence` for per-order ordering | Entity |
+| OrderStatus | The `Created \| Reserved \| Paid \| Shipped \| Delivered \| FulfillmentException \| Cancelled \| Refunded` lifecycle state machine; the compare-and-swap field for every transition (design-decisions.md) | Value object |
+| FulfillmentException | The non-terminal, distinguishable hold state entered from `Paid` on consuming `ShipmentCreationFailed` (ADR-0015); resolved only by an explicit manual/ops action, back to `Paid` or on to `Cancelled` | Value (an `OrderStatus` value, not a separate type) |
+| IdempotencyKey | The client-supplied `Idempotency-Key` header value on `POST /orders`, unique per Order; lives directly on the aggregate (no separate ledger, unlike Payment's `IdempotencyRecord`) since no external call sits between reserving it and committing the order | Value object |
+| OrderCreated | Domain event: fired on `Created`, the initial commit of `POST /orders` | Domain event |
+| OrderConfirmed | Domain event: fired on `Reserved → Paid`, as soon as `PaymentCompleted` is received (ADR-0002) — not gated on shipment creation | Domain event |
+| OrderCancelled | Domain event: fired once the order reaches the terminal `Cancelled` state | Domain event |
+| OrderCompensationTriggered | Domain event: fired at the start of any compensation sequence (pre-confirmation `PaymentFailed`, client-initiated cancel, `FulfillmentException`-to-`Cancelled`, or a `ChargebackReceived`-driven Inventory-release attempt) — one mechanism reused across all four triggers | Domain event |
+| OrderDelivered | Domain event: fired on `Shipped → Delivered`, the sole terminal-delivery signal unifying the BRD's earlier `OrderCompleted`/`OrderDelivered` naming (ADR-0005) | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-order-service` uses it |
+|---|---|---|
+| Reservation / `reservationId` | kart-inventory-service | Referenced only via `POST /inventory/reserve`'s response and `InventoryReserved`/`InventoryReservationFailed`/`InventoryReleased` payloads; Order never models Inventory's own `WarehouseStock`/`Reservation` aggregate |
+| PaymentIntent / `paymentIntentId` | kart-payment-service | Referenced only via `PaymentCompleted`/`PaymentFailed`/`ChargebackReceived` payloads and the `POST /payments/{id}/refund` call; Order never models Payment's own charge/refund/dispute state machine |
+| Shipment / `ShipmentDispatched` / `ShipmentCreationFailed` | kart-shipping-service | Consumed only as status signals (dispatch confirmation, terminal fulfillment failure); Order never models Shipping's own carrier/label aggregate |
+| TrackingRecord / `DeliveryStatusUpdated` | kart-delivery-tracking-service | Consumed only for its terminal "delivered" status value; Order never models Delivery Tracking's own tracking-history aggregate |

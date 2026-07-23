@@ -255,3 +255,26 @@ See [full architecture doc](../services/kart-identity-service/architecture.md).
 | Outbound (external) | Social IdP | OIDC authorization request | Sync, own bulkhead group |
 
 No synchronous outbound dependency on any other **internal** Kart service — Identity's only synchronous outbound calls are to external IdPs it does not control (the explicit reason it holds "sole point of contact" status, BRD §24.2); its only synchronous inbound internal-service edge is Admin Service's lock/unlock call (ADR-0010), which matches the outbound edge already recorded from Admin's own side. Platform's highest availability tier (99.99%) — every service's RBAC resolution runs through Identity at token-mint time (BRD §24.1) and every authenticated request is gated by a JWT it minted, though this is a design-time/mint-time coupling resolved locally at the Gateway edge via a cached public key, not a live per-request call (see `architecture.md`'s Distributed-Monolith Risk section). Not a participant in the Order Saga (BRD §12). Consumes no events by design — the admin-lock/unlock trigger is a synchronous inbound API call, not an event.
+
+## kart-order-service
+
+See [full architecture doc](../services/kart-order-service/architecture.md). The platform's sole Saga orchestrator (BRD §5.1) — the last service to pass through this stage; every edge below was already anticipated from the peer's own side in `kart-payment-service`, `kart-inventory-service`, and `kart-shipping-service`'s prior entries above, formalized here from Order's side.
+
+| Direction | Peer | Mechanism | Type |
+|---|---|---|---|
+| Inbound (client) | Client/Checkout via API Gateway | `POST /orders`, `GET /orders/{id}`, `POST /orders/{id}/cancel` | Sync |
+| Outbound (saga step 1) | Inventory | `POST /inventory/reserve` | Sync |
+| Outbound (saga compensation) | Inventory | `POST /inventory/release` | Sync |
+| Outbound (saga compensation) | Payment | `POST /payments/{id}/refund` | Sync |
+| Inbound | Inventory | `InventoryReserved`, `InventoryReservationFailed` | Async |
+| Inbound | Payment | `PaymentCompleted`, `PaymentFailed`, `ChargebackReceived` | Async |
+| Inbound | Shipping | `ShipmentDispatched`, `ShipmentCreationFailed` | Async |
+| Inbound | Delivery Tracking | `DeliveryStatusUpdated` (terminal "delivered" only) | Async |
+| Inbound (internal) | Admin Service | `POST /orders/{id}/resolve-fulfillment-exception` (new) | Sync |
+| Outbound | Payment, Analytics | `OrderCreated` | Async |
+| Outbound | Shipping, Notification, Analytics | `OrderConfirmed` | Async |
+| Outbound | Inventory, Offer, Notification, Analytics | `OrderCancelled` | Async |
+| Outbound | Inventory, Notification, Analytics | `OrderCompensationTriggered` | Async |
+| Outbound | Recommendation, Review, Notification, Analytics | `OrderDelivered` | Async |
+
+Three synchronous outbound edges (Inventory reserve, Inventory release, Payment refund) and one synchronous inbound edge (Admin's fulfillment-exception resolution) — each bounded, non-chatty, and non-transitive (none of Order's synchronous peers themselves synchronously call a third Kart service), so no distributed-monolith risk is flagged. The mandatory saga orchestrator for both the Order Saga's success flow (BRD §12.1) and compensation flow (BRD §12.2). `ChargebackReceived` (ADR-0012) and `ShipmentCreationFailed` (ADR-0015) are two new async inbound edges added by this pass, both already expected from Payment's and Shipping's own approved docs. See [ADR-0002](../adr/0002-order-shipping-async-integration.md), [ADR-0005](../adr/0005-unify-order-terminal-event.md), [ADR-0009](../adr/0009-order-inventory-sync-scope.md), [ADR-0012](../adr/0012-payment-chargeback-handling.md), and [ADR-0015](../adr/0015-shipping-shipment-creation-failed-event.md).

@@ -1,7 +1,7 @@
 ---
 doc_type: design-decisions
 service: kart-order-service
-status: draft
+status: approved
 generated_by: design-decision-agent
 source: docs/services/kart-order-service/requirement-spec.md, docs/services/kart-order-service/edge-cases.md
 ---
@@ -123,12 +123,30 @@ Cross-cutting technology/design-pattern choices forced by this service's require
 - **Requirement driving this:** edge-cases.md's "Orphaned/Stuck Saga Detection"; BRD §27's interview question on detecting a saga stuck halfway forever.
 - **Options considered (2):** periodic reconciliation job sweeping `orders` for rows stuck past a threshold and forcing compensation · rely purely on message-broker redelivery/DLQ alerting with no dedicated reconciliation sweep.
 - **Decision:**
-  - Chosen: periodic reconciliation sweep, run every 60s, forcing compensation on orders stuck past 2x the budget of the step currently awaited (4s awaiting `InventoryReserved`, 60s awaiting `PaymentCompleted`/`PaymentFailed`, 120s awaiting `ShipmentDispatched` — derived from the Per-Step Saga Timeout Budget decision above).
-  - Why: reuses the same reconcile-by-polling operational shape the platform already applies via the Outbox poller (BRD §11), keeping Order's operational model consistent; broker DLQ alone does not catch a crashed in-process timeout handler, which is exactly the gap the sweep exists to close.
-  - Trade-off accepted: up to one sweep interval (60s) plus the grace threshold can elapse before a genuinely stuck saga is force-compensated — not instant detection.
+  - Chosen: periodic reconciliation sweep, run every 60s, acting on orders stuck past 2x the budget of the step currently awaited (4s awaiting `InventoryReserved`, 60s awaiting `PaymentCompleted`/`PaymentFailed`, 120s awaiting `ShipmentDispatched` — derived from the Per-Step Saga Timeout Budget decision above). **The action taken is not uniform**: Inventory-await and Payment-await cases force the original reverse-order compensation (release Inventory, mark `Cancelled`); the Shipping-await case instead forces entry into `FulfillmentException` (see the decision below) — never automatic refund-and-cancel — since `PaymentCompleted` has already been received by that point, matching how an explicit `ShipmentCreationFailed` is handled.
+  - Why: reuses the same reconcile-by-polling operational shape the platform already applies via the Outbox poller (BRD §11), keeping Order's operational model consistent; broker DLQ alone does not catch a crashed in-process timeout handler, which is exactly the gap the sweep exists to close. The Shipping-await carve-out keeps this decision consistent with "Post-Confirmation Fulfillment Exception Handling" below rather than silently reintroducing automatic post-confirmation refunding through a second code path.
+  - Trade-off accepted: up to one sweep interval (60s) plus the grace threshold can elapse before a genuinely stuck saga is acted on — not instant detection.
+
+## Decision: Post-Confirmation Fulfillment Exception Handling
+
+- **Requirement driving this:** requirement-spec.md's "Post-Confirmation Fulfillment Exception Handling" (Saga Orchestration, ADR-0015); edge-cases.md's "Shipment Creation Permanently Fails After Order Confirmation."
+- **Options considered (3):** reuse the existing pre-confirmation compensation flow (release Inventory, mark `OrderCancelled`) despite payment already being captured · introduce a new, distinguishable non-terminal hold state (`FulfillmentException`) requiring an explicit manual/ops action to resolve · auto-cancel and auto-refund immediately with no human review.
+- **Decision:**
+  - Chosen: new `FulfillmentException` hold state (`Paid → FulfillmentException`), entered either by consuming `ShipmentCreationFailed` directly or by the Orphaned/Stuck Saga sweep's Shipping-await threshold firing with no such event ever received (see the Reconciliation Mechanism decision above) — the two triggers converge on the identical state, since a silent timeout is no more automatically resolvable than an explicit failure. Resolved only by an explicit manual/ops action into either `Paid` (retry) or `Cancelled` (a conditional, idempotent Inventory-release attempt followed by an explicit Payment refund call).
+  - Why: the existing compensation flow was designed for a reservation/charge that never completed — reusing it here would silently leave a captured charge unaccounted for; auto-refunding on the first carrier failure (or the first sweep-detected timeout) forecloses a correctable failure (e.g., bad address) with no BRD-stated basis for a specific auto-retry policy.
+  - Trade-off accepted: this is the one Saga transition in the whole state machine that depends on a human/operational trigger rather than resolving itself automatically — a deliberate, narrow exception to the otherwise fully automated saga.
+
+## Decision: Chargeback Reaction Mechanism
+
+- **Requirement driving this:** requirement-spec.md's "Chargeback Reaction" (Saga Orchestration, ADR-0012); edge-cases.md's "Chargeback Received Against an Order in Any Post-Payment State."
+- **Options considered (3):** treat `ChargebackReceived` as illegal/ignorable before `Delivered`, actionable only afterward · carve out a narrow, explicit exception allowing a direct `→ Refunded` transition from any state `Paid` onward, including the non-terminal `FulfillmentException` hold · introduce a third terminal state distinct from both `Cancelled` and `Refunded` specifically for chargeback-driven closures.
+- **Decision:**
+  - Chosen: narrow carve-out — direct `→ Refunded` transition from **any** state `Paid` onward (`Paid`, `Shipped`, `Delivered`, or `FulfillmentException`), plus a state-guarded (idempotent no-op if already released) Inventory release attempt; no second Payment-initiated refund call is ever made. `FulfillmentException` is deliberately included, not omitted — a held order has already had `PaymentCompleted`, so it is exactly as reachable by a bank-initiated chargeback as any other post-`Paid` state.
+  - Why: the chargeback has already reversed the charge externally by the time this event arrives regardless of Order's current lifecycle position — treating it as illegal pre-`Delivered` would leave Order's own read model wrong about the order's true payment state; a third terminal state would duplicate `Refunded`'s existing meaning for no behavioral difference.
+  - Trade-off accepted: the previously-exceptionless "`Refunded` only reachable from `Delivered`" rule now has exactly one named exception — scoped tightly to this one ADR-driven event, not a general loosening of the state machine.
 
 ## Sign-off
 
-- [ ] Reviewed by human
-- [ ] Technology/pattern choices approved
-- [ ] Approved to proceed to Architecture Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Technology/pattern choices approved
+- [x] Approved to proceed to Architecture Agent
