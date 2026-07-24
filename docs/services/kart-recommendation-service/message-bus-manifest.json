@@ -1,0 +1,42 @@
+{
+  "service": "kart-recommendation-service",
+  "exchange": null,
+  "dlx": { "name": "recommendation.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "recommendation.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.order.delivered" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "recommendation.dlx",
+        "x-dead-letter-routing-key": "recommendation.order-events.dlq"
+      }
+    },
+    {
+      "name": "recommendation.product-events.queue",
+      "bindings": [
+        { "exchange": "product.exchange", "routingKey": "product.product.created" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "recommendation.dlx",
+        "x-dead-letter-routing-key": "recommendation.product-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "recommendation.order-events.dlq", "bindings": [{ "exchange": "recommendation.dlx", "routingKey": "recommendation.order-events.dlq" }] },
+    { "name": "recommendation.product-events.dlq", "bindings": [{ "exchange": "recommendation.dlx", "routingKey": "recommendation.product-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "recommendation.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "recommendation.order-events.queue"
+      }
+    }
+  ],
+  "_comment": "Recommendation publishes no RabbitMQ events (pure consumer/query context) — it owns no exchange, only its own DLX and consumer queues bound to each producer's exchange. Its third input (ProductViewed clickstream) is Kafka, not RabbitMQ — see event-contract.md."
+}

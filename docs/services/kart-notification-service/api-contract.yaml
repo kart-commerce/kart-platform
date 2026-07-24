@@ -61,9 +61,11 @@ info:
     This service exposes NO public API and NO internal-ops API. kart-notification-service is
     consumer-only (requirement-spec.md §5.4/§2; reaffirmed verbatim in architecture.md's Boundary
     Rationale and design-decisions.md's Communication Style decision) — it is driven entirely by
-    consuming events off the `ecommerce.events` RabbitMQ topic exchange (`order.*`, `payment.*`,
-    plus dedicated routing keys for `WishlistPriceAlertTriggered`, `UserRegistered`,
-    `ShipmentDispatched`, `DeliveryStatusUpdated`, and `UserNotificationPreferenceUpdated`) and
+    consuming events off seven separate producer-owned RabbitMQ exchanges — `order.exchange`
+    (`order.*`), `payment.exchange` (`payment.*`), `wishlist.exchange`, `identity.exchange`,
+    `shipping.exchange`, `tracking.exchange`, and `user.exchange` (dedicated routing keys for
+    `WishlistPriceAlertTriggered`, `UserRegistered`, `ShipmentDispatched`, `DeliveryStatusUpdated`,
+    and `UserNotificationPreferenceUpdated` respectively) — never one shared exchange, and
     publishing one outbound audit event (`NotificationSent`). There is no synchronous inbound
     surface of any kind for any client, service, or internal ops/support tool to call. The one
     candidate synchronous surface considered upstream — a Notification-owned API for users to set

@@ -317,25 +317,29 @@ sequenceDiagram
 
 ### 8.1 Topology
 
+Every service owns its **entire** RabbitMQ topology independently — exchange, queues, bindings, consumers, retry ladder, and DLQ. There is no shared exchange anywhere on the platform; a service's messaging footprint is fully described by its own `message-bus-manifest.json` (§9).
+
 |Element|Design|
 |---|---|
-|Exchange type|Topic exchange (`ecommerce.events`) for flexible routing by `service.entity.action` keys|
-|Routing Key Convention|`order.created`, `payment.completed`, `inventory.reservation.failed`|
-|Queue per Consumer Group|Each service owns its own queue bound with a wildcard pattern, e.g. `notification.*`|
-|DLX|Every queue has `x-dead-letter-exchange` pointing to a shared `dlx.ecommerce`|
-|DLQ|One DLQ per service queue, inspected via admin tooling, never silently dropped|
-|Retry Queue|TTL-based "parking lot" queue (`retry.5s`, `retry.30s`, `retry.5m`) that dead-letters back into the original queue after expiry — classic RabbitMQ delayed-retry pattern|
+|Exchange type|One topic exchange **per publishing service**, `<service>.exchange` (e.g. `order.exchange`, `payment.exchange`, `inventory.exchange`), declared and owned only by that service|
+|Routing Key Convention|`service.entity.action`, e.g. `order.order.created`, `payment.intent.completed`, `inventory.reservation.failed` — unchanged by this topology; scoped within the publisher's own exchange now instead of a shared one|
+|Queue per Consumer Group|Each consuming service declares its own queue(s), binding directly to the *producer's* exchange by name with a routing-key pattern (e.g. Notification declares `notification.order-events.queue` bound to `order.exchange` on `order.*`) — the producer never declares or references its consumers' queues|
+|DLX|Every queue's `x-dead-letter-exchange` points to that **consuming** service's own DLX (`<service>.dlx`, e.g. `notification.dlx`) — never a shared one|
+|DLQ|One DLQ per consumer queue, owned by the consuming service, inspected via admin tooling, never silently dropped|
+|Retry Queue|TTL-based "parking lot" queue owned by the consuming service (`<service>.retry.5s`, `.30s`, `.5m`) that dead-letters back into the original queue after expiry via RabbitMQ's default (nameless) exchange, routing key = target queue name — no topic exchange involved in the retry path at all|
 
 ### 8.2 Why This Design
 
-- **Topic exchange over direct exchange**: allows adding new consumers without touching the publisher — publishers don't know or care who's listening.
-- **Per-service DLQ over one global DLQ**: failure triage is per-team; a global DLQ becomes an unowned dumping ground.
-- **TTL-ladder retry over immediate requeue**: immediate requeue under a persistent failure (e.g., DB down) creates a hot retry loop that pins CPU; a backoff ladder spaces retries out.
+- **Topic exchange per service over one shared exchange**: each service's messaging footprint — and its blast radius — is fully independent. A misconfiguration, permission change, or outage affecting one service's exchange cannot touch any other service's topology, and a service can be onboarded, renamed, or decommissioned by touching only its own manifest.
+- **Consumer-owned bindings preserve the original decoupling goal**: a producer still never knows or cares who's listening — it only ever touches its own exchange. What moves is *who declares the binding*: instead of every service binding to one shared exchange, each consumer binds directly to the specific producer exchange(s) it depends on.
+- **Per-service DLX/DLQ over one global DLX**: failure triage is per-team, and now the DLX itself (not just the DLQ) is unowned-dumping-ground-proof — there's no shared infrastructure component left for triage to be ambiguous about.
+- **TTL-ladder retry over immediate requeue**: immediate requeue under a persistent failure (e.g., DB down) creates a hot retry loop that pins CPU; a backoff ladder spaces retries out. Routing the ladder's redelivery through the default exchange (rather than back through a topic exchange) keeps the retry path entirely within the consuming service's own declared topology.
 
 ### 8.3 Alternatives Considered
 
 |Alternative|Pros|Cons|
 |---|---|---|
+|Single shared topic exchange (`ecommerce.events`) — the platform's original design|Fewer exchanges to declare; one place to look for the full event stream|Every service's topology is entangled with a shared piece of infrastructure no single team owns; a broker-level change (permissions, policy, even accidental deletion) has platform-wide blast radius — the opposite of the per-service ownership this platform otherwise enforces everywhere else (databases, DLQs, deploys)|
 |Direct exchange per event type|Simpler routing|Explodes exchange count, hard to add cross-cutting consumers|
 |Single shared queue for all consumers|Fewer resources|One slow consumer blocks all others (no isolation)|
 |Kafka from day one|Replay, higher throughput|Overkill for early-stage bounded queues; steeper ops learning curve early|
@@ -344,44 +348,67 @@ sequenceDiagram
 
 ## 9. Configuration-Driven Message Bus
 
-Application startup reads a JSON manifest and declares all RabbitMQ topology idempotently (`durable`, declare-if-not-exists) — no manual `rabbitmqctl` setup, no drift between environments.
+Application startup reads a JSON manifest and declares that **service's own** RabbitMQ topology idempotently (`durable`, declare-if-not-exists) — no manual `rabbitmqctl` setup, no drift between environments. Per §8.1, there is one manifest per service (`docs/services/<service>/message-bus-manifest.json`, output by the Event Design Agent alongside `event-contract.md`) — never one platform-wide manifest. A service's manifest declares only: (1) the exchange it publishes into, (2) its own DLX, (3) the queues it consumes on (each bound to whichever producer's exchange it needs — its own or another service's, referenced by name only, never co-owned), (4) the DLQs for those queues, and (5) its own retry ladder.
+
+Worked example: `kart-notification-service`'s manifest — the platform's broadest fan-in consumer, binding to six other services' exchanges while owning none of them:
 
 ```json
 {
-  "exchanges": [
-    { "name": "ecommerce.events", "type": "topic", "durable": true }
-  ],
+  "service": "kart-notification-service",
+  "exchange": { "name": "notification.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "notification.dlx", "type": "topic", "durable": true },
   "queues": [
     {
-      "name": "notification.queue",
+      "name": "notification.order-events.queue",
       "bindings": [
-        { "exchange": "ecommerce.events", "routingKey": "order.*" },
-        { "exchange": "ecommerce.events", "routingKey": "payment.*" }
+        { "exchange": "order.exchange", "routingKey": "order.*" }
       ],
       "arguments": {
-        "x-dead-letter-exchange": "dlx.ecommerce",
-        "x-dead-letter-routing-key": "notification.dlq"
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.order-events.dlq"
       }
     },
     {
-      "name": "notification.dlq",
+      "name": "notification.payment-events.queue",
       "bindings": [
-        { "exchange": "dlx.ecommerce", "routingKey": "notification.dlq" }
+        { "exchange": "payment.exchange", "routingKey": "payment.*" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.payment-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    {
+      "name": "notification.order-events.dlq",
+      "bindings": [
+        { "exchange": "notification.dlx", "routingKey": "notification.order-events.dlq" }
       ]
     },
     {
-      "name": "retry.30s",
+      "name": "notification.payment-events.dlq",
+      "bindings": [
+        { "exchange": "notification.dlx", "routingKey": "notification.payment-events.dlq" }
+      ]
+    }
+  ],
+  "retry": [
+    {
+      "name": "notification.retry.30s",
       "arguments": {
         "x-message-ttl": 30000,
-        "x-dead-letter-exchange": "ecommerce.events",
-        "x-dead-letter-routing-key": "notification.retry"
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "notification.order-events.queue"
       }
     }
   ]
 }
 ```
 
-**Why config-driven beats code-driven**: topology changes become a reviewable diff instead of a code deploy; the same manifest can be diffed across dev/staging/prod to catch drift; non-backend engineers (SRE, on-call) can read the JSON to understand routing without reading C#.
+Note the `bindings[].exchange` values (`order.exchange`, `payment.exchange`) are references, not declarations of shared ownership — Notification's manifest assumes those exchanges exist (declared idempotently by Order's and Payment's own manifests) and only declares its *own* exchange, DLX, queues, DLQs, and retry ladder. The retry queue's `x-dead-letter-exchange` is the empty string — RabbitMQ's default (nameless) exchange, which requires no declaration and routes directly to the queue named as its routing key, so even the retry path never touches a shared exchange.
+
+**Why config-driven beats code-driven**: topology changes become a reviewable diff instead of a code deploy; the same manifest can be diffed across dev/staging/prod to catch drift; non-backend engineers (SRE, on-call) can read the JSON to understand routing without reading C#. **Why per-service beats one platform-wide manifest**: a service's messaging footprint changes (new consumer, new retry tier) without touching any other service's file or requiring cross-team review of an unrelated diff — the manifest's blast radius matches its owning service's, same as the topology it describes.
 
 ---
 

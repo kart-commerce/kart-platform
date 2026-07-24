@@ -85,7 +85,7 @@ CREATE TRIGGER trg_shipments_status_guard
 --                              the SAME transaction as the shipments row's terminal-state UPDATE,
 --                              once the carrier interaction resolves (success or exhaustion). A
 --                              separate event-relay poller reads these and publishes to
---                              RabbitMQ (ecommerce.events, kart-conventions.md), standard tier
+--                              RabbitMQ (shipping.exchange, kart-conventions.md), standard tier
 --                              (3x retry, shipping.dlq — design-decisions.md's Retry/DLQ decision).
 CREATE TABLE shipment_outbox (
     id            UUID PRIMARY KEY,
@@ -158,7 +158,7 @@ COMMIT;
 
 (or the symmetric `Failed` / `ShipmentCreationFailed` path once every configured carrier option is exhausted, ADR-0015). If `UPDATE shipments ... WHERE status = 'Pending'` affects 0 rows, this marker is redundant against an already-terminal row (a duplicate/redelivered resolution) — `trg_shipments_status_guard` would reject it anyway; the worker simply marks the outbox row processed and does nothing else, matching ddd-model.md's "no-op, never reapplied" invariant.
 
-**3. Event-relay poller** (standard Outbox relay, BRD §11): polls `idx_shipment_outbox_pending_publish`, publishes each row's `payload` to `ecommerce.events` under the appropriate routing key, sets `processed_at` (and, per BRD §24.3, `updated_by = 'system:shipping-outbox-relay-poller'`) on success. Identical shape to `kart-order-service`'s and `kart-inventory-service`'s own relays (design-decisions.md).
+**3. Event-relay poller** (standard Outbox relay, BRD §11): polls `idx_shipment_outbox_pending_publish`, publishes each row's `payload` to `shipping.exchange` under the appropriate routing key, sets `processed_at` (and, per BRD §24.3, `updated_by = 'system:shipping-outbox-relay-poller'`) on success. Identical shape to `kart-order-service`'s and `kart-inventory-service`'s own relays (design-decisions.md).
 
 ## Where Does the Destination Address Live? — Filling a Gap `ddd-model.md` Leaves Implicit
 

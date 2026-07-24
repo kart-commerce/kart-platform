@@ -1,0 +1,9 @@
+{
+  "service": "kart-category-service",
+  "exchange": { "name": "category.exchange", "type": "topic", "durable": true },
+  "dlx": null,
+  "queues": [],
+  "dlqs": [],
+  "retry": [],
+  "_comment": "Category publishes CategoryUpdated onto category.exchange; it consumes no events (writes are driven synchronously by Admin's own API calls, per ADR-0010). Search/Analytics bind their own queues to category.exchange."
+}

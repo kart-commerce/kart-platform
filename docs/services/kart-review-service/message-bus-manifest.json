@@ -1,0 +1,32 @@
+{
+  "service": "kart-review-service",
+  "exchange": { "name": "review.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "review.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "review.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.order.created" },
+        { "exchange": "order.exchange", "routingKey": "order.order.delivered" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "review.dlx",
+        "x-dead-letter-routing-key": "review.order-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "review.order-events.dlq", "bindings": [{ "exchange": "review.dlx", "routingKey": "review.order-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "review.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "review.order-events.queue"
+      }
+    }
+  ],
+  "_comment": "Review publishes ReviewSubmitted/ReviewUpdated/ReviewUnpublished onto review.exchange (own topology, not shown — Product/Analytics/Search bind their own queues to it)."
+}

@@ -8,7 +8,7 @@ source: docs/services/kart-shipping-service/ddd-model.md, docs/services/kart-shi
 
 # Event Contract: kart-shipping-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10/requirement-spec §3's simplified shared `shipping.dlq` label is expanded into one DLQ per event below, the same override `kart-payment-service/event-contract.md` and `kart-order-service/event-contract.md` already applied for their own BRD-simplified DLQ labels.
+Exchange: `shipping.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10/requirement-spec §3's simplified shared `shipping.dlq` label is expanded into one DLQ per event below, the same override `kart-payment-service/event-contract.md` and `kart-order-service/event-contract.md` already applied for their own BRD-simplified DLQ labels.
 
 ## Published
 

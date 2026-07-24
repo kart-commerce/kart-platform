@@ -8,7 +8,7 @@ source: docs/services/kart-user-service/ddd-model.md, docs/services/kart-user-se
 
 # Event Contract: kart-user-service
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared** across different event types or different consumer services.
+Exchange: `user.exchange` (RabbitMQ topic exchange, owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared** across different event types or different consumer services.
 
 ## Published Events
 

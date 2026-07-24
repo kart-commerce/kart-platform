@@ -1,0 +1,9 @@
+{
+  "service": "kart-admin-service",
+  "exchange": { "name": "admin.exchange", "type": "topic", "durable": true },
+  "dlx": null,
+  "queues": [],
+  "dlqs": [],
+  "retry": [],
+  "_comment": "Admin publishes AdminActionPerformed (fire-and-forget, 1x, own DLQ) onto admin.exchange; it consumes no events — admin-triggered actions on other services (e.g. Identity suspension) are synchronous REST calls, not event consumption. Analytics binds its own queue to admin.exchange."
+}

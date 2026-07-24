@@ -10,7 +10,7 @@ source: docs/services/kart-admin-service/requirement-spec.md, docs/services/kart
 
 **Superseded note (corrected on this pass):** this section previously read "No `ddd-model.md` exists for this service," citing the same basis `database-design.md` originally recorded. `docs/services/kart-admin-service/ddd-model.md` has since been authored — formalizing Admin's shape as **two** aggregate roots, `AdminPermissionGrant` and `AdminAction`, refining ADR-0010's slash-joined "the admin action / permission grant" shorthand rather than contradicting it. `AdminAction` is the sole source of this service's one published event: `ddd-model.md`'s own Domain Events section for that aggregate states `AdminActionPerformed` is "raised by the Outbox poller once this row's own local commit has landed" — fully consistent with this document's table below, no rework needed.
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
+Exchange: `admin.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
 | Event | Routing Key | Published/Consumed | Key Fields | Retry | DLQ | Criticality Justification |
 |---|---|---|---|---|---|---|

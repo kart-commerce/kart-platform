@@ -8,7 +8,7 @@ source: docs/services/kart-inventory-service/requirement-spec.md, docs/services/
 
 # Event Contract: kart-inventory-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
+Exchange: `inventory.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
 ## Published Events
 

@@ -1,0 +1,43 @@
+{
+  "service": "kart-wishlist-service",
+  "exchange": { "name": "wishlist.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "wishlist.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "wishlist.product-events.queue",
+      "bindings": [
+        { "exchange": "product.exchange", "routingKey": "product.price.changed" },
+        { "exchange": "product.exchange", "routingKey": "product.product.discontinued" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "wishlist.dlx",
+        "x-dead-letter-routing-key": "wishlist.product-events.dlq"
+      }
+    },
+    {
+      "name": "wishlist.user-events.queue",
+      "bindings": [
+        { "exchange": "user.exchange", "routingKey": "user.data-erased" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "wishlist.dlx",
+        "x-dead-letter-routing-key": "wishlist.user-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "wishlist.product-events.dlq", "bindings": [{ "exchange": "wishlist.dlx", "routingKey": "wishlist.product-events.dlq" }] },
+    { "name": "wishlist.user-events.dlq", "bindings": [{ "exchange": "wishlist.dlx", "routingKey": "wishlist.user-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "wishlist.user-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "wishlist.user-events.queue"
+      }
+    }
+  ],
+  "_comment": "Wishlist publishes WishlistPriceAlertTriggered onto wishlist.exchange (own topology, not shown — Notification/Analytics bind their own queues to it)."
+}

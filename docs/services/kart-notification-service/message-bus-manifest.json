@@ -1,0 +1,105 @@
+{
+  "service": "kart-notification-service",
+  "exchange": { "name": "notification.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "notification.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "notification.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.*" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.order-events.dlq"
+      }
+    },
+    {
+      "name": "notification.payment-events.queue",
+      "bindings": [
+        { "exchange": "payment.exchange", "routingKey": "payment.*" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.payment-events.dlq"
+      }
+    },
+    {
+      "name": "notification.wishlist-events.queue",
+      "bindings": [
+        { "exchange": "wishlist.exchange", "routingKey": "wishlist.price-alert.triggered" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.wishlist-events.dlq"
+      }
+    },
+    {
+      "name": "notification.identity-events.queue",
+      "bindings": [
+        { "exchange": "identity.exchange", "routingKey": "identity.user.registered" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.identity-events.dlq"
+      }
+    },
+    {
+      "name": "notification.shipping-events.queue",
+      "bindings": [
+        { "exchange": "shipping.exchange", "routingKey": "shipping.shipment.dispatched" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.shipping-events.dlq"
+      }
+    },
+    {
+      "name": "notification.tracking-events.queue",
+      "bindings": [
+        { "exchange": "tracking.exchange", "routingKey": "tracking.delivery-status.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.tracking-events.dlq"
+      }
+    },
+    {
+      "name": "notification.user-events.queue",
+      "bindings": [
+        { "exchange": "user.exchange", "routingKey": "user.notification-preference-updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "notification.dlx",
+        "x-dead-letter-routing-key": "notification.user-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "notification.order-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.order-events.dlq" }] },
+    { "name": "notification.payment-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.payment-events.dlq" }] },
+    { "name": "notification.wishlist-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.wishlist-events.dlq" }] },
+    { "name": "notification.identity-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.identity-events.dlq" }] },
+    { "name": "notification.shipping-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.shipping-events.dlq" }] },
+    { "name": "notification.tracking-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.tracking-events.dlq" }] },
+    { "name": "notification.user-events.dlq", "bindings": [{ "exchange": "notification.dlx", "routingKey": "notification.user-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "notification.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "notification.order-events.queue"
+      }
+    },
+    {
+      "name": "notification.payment-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "notification.payment-events.queue"
+      }
+    }
+  ],
+  "_comment": "Notification also publishes NotificationSent (fire-and-forget, no DLQ) onto its own notification.exchange for Analytics to consume. This is the platform's broadest fan-in — 7 producer bindings, no shared exchange anywhere."
+}

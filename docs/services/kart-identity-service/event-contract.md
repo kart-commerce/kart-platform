@@ -12,7 +12,7 @@ source: docs/services/kart-identity-service/requirement-spec.md, docs/services/k
 
 This contract was originally drafted before `ddd-model.md` existed for this service. That file has since been produced and approved — it confirms Identity's three published events and (now) one consumed event exactly as this contract already stated, with no contradiction. Status now `approved`.
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
+Exchange: `identity.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
 ## Published Events
 

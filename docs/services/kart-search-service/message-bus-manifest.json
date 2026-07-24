@@ -1,0 +1,57 @@
+{
+  "service": "kart-search-service",
+  "exchange": null,
+  "dlx": { "name": "search.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "search.product-events.queue",
+      "bindings": [
+        { "exchange": "product.exchange", "routingKey": "product.product.created" },
+        { "exchange": "product.exchange", "routingKey": "product.price.changed" },
+        { "exchange": "product.exchange", "routingKey": "product.product.updated" },
+        { "exchange": "product.exchange", "routingKey": "product.product.discontinued" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "search.dlx",
+        "x-dead-letter-routing-key": "search.product-events.dlq"
+      }
+    },
+    {
+      "name": "search.category-events.queue",
+      "bindings": [
+        { "exchange": "category.exchange", "routingKey": "category.category.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "search.dlx",
+        "x-dead-letter-routing-key": "search.category-events.dlq"
+      }
+    },
+    {
+      "name": "search.review-events.queue",
+      "bindings": [
+        { "exchange": "review.exchange", "routingKey": "review.review.submitted" },
+        { "exchange": "review.exchange", "routingKey": "review.review.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "search.dlx",
+        "x-dead-letter-routing-key": "search.review-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "search.product-events.dlq", "bindings": [{ "exchange": "search.dlx", "routingKey": "search.product-events.dlq" }] },
+    { "name": "search.category-events.dlq", "bindings": [{ "exchange": "search.dlx", "routingKey": "search.category-events.dlq" }] },
+    { "name": "search.review-events.dlq", "bindings": [{ "exchange": "search.dlx", "routingKey": "search.review-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "search.product-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "search.product-events.queue"
+      }
+    }
+  ],
+  "_comment": "Search publishes no events (pure consumer/query context) — it owns no exchange, only its own DLX and consumer queues bound to each producer's exchange."
+}

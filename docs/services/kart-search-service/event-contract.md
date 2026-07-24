@@ -8,7 +8,7 @@ source: docs/services/kart-search-service/ddd-model.md, docs/services/kart-searc
 
 # Event Contract: kart-search-service
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared**, matching the per-consumer-group DLQ correction every publisher this service consumes from has already made for its own event contract.
+Exchange: this service publishes no events (see below), so it owns no exchange of its own — only its own DLX (`search.dlx`) for the consumer queues below. Each consumed event is bound directly to its *publisher's* own exchange (`product.exchange`, `category.exchange`, `review.exchange`) with routing key convention `service.entity.action`, per [kart-conventions.md](../../standards/kart-conventions.md). Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared**, matching the per-consumer-group DLQ correction every publisher this service consumes from has already made for its own event contract.
 
 ## Published Events
 

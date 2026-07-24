@@ -1,0 +1,42 @@
+{
+  "service": "kart-offer-service",
+  "exchange": { "name": "offer.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "offer.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "offer.product-events.queue",
+      "bindings": [
+        { "exchange": "product.exchange", "routingKey": "product.price.changed" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "offer.dlx",
+        "x-dead-letter-routing-key": "offer.product-events.dlq"
+      }
+    },
+    {
+      "name": "offer.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.order.cancelled" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "offer.dlx",
+        "x-dead-letter-routing-key": "offer.order-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "offer.product-events.dlq", "bindings": [{ "exchange": "offer.dlx", "routingKey": "offer.product-events.dlq" }] },
+    { "name": "offer.order-events.dlq", "bindings": [{ "exchange": "offer.dlx", "routingKey": "offer.order-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "offer.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "offer.order-events.queue"
+      }
+    }
+  ],
+  "_comment": "Offer publishes CouponRedeemed/CouponRedemptionVoided/CouponIssued/CouponDeactivated/PriceQuoteIssued/PromotionActivated/PromotionDeactivated onto offer.exchange (own topology, not shown — Order/Analytics bind their own queues to it)."
+}
