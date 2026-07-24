@@ -110,7 +110,7 @@ See [full architecture doc](../services/kart-recommendation-service/architecture
 | Inbound (client) | Client/Mobile/Web via API Gateway | `GET /recommendations/{userId}` | Sync |
 | Inbound | Order | `OrderDelivered` | Async |
 | Inbound | Product | `ProductCreated` | Async |
-| Inbound | (publisher not yet named) | Clickstream event(s) | Async |
+| Inbound | Client Event Ingestion Gateway (infra, not a bounded-context service — see `ddd-model.md`) | `ProductViewed`, `ProductClicked`, `SearchPerformed` (Kafka, `kart.recommendation.clickstream-events`) | Async |
 | Outbound | Inventory | `GET /inventory/{sku}` | Sync |
 | Outbound | Product | `GET /products/{id}` | Sync |
 
@@ -204,7 +204,7 @@ See [full architecture doc](../services/kart-review-service/architecture.md).
 | Inbound (client, back-office) | Support/Admin console via API Gateway | `PATCH /reviews/{id}/moderate` | Sync |
 | Inbound | Order | `OrderDelivered` (ADR-0005) — projected into Review's own materialized delivered-order record; verified-purchase gate checks this local copy only, never a live call to Order | Async |
 | Outbound | Product, Analytics | `ReviewSubmitted` (ADR-0014: Product's copy is denormalized, Review is canonical) | Async |
-| Outbound | Product, Analytics | `ReviewUpdated` (new; retry/DLQ tier not yet registered — carried to Event Design Agent stage) | Async |
+| Outbound | Product, Analytics | `ReviewUpdated` (new; retry/DLQ tier confirmed 2x, no paging, `review.review-updated.dlq`, per `kart-review-service/event-contract.md`) | Async |
 | Outbound (external, non-platform) | Automated content-safety classifier | Synchronous blocking pre-check inside `POST /reviews`/`PATCH /reviews/{id}`; fail-safe-to-human-queue circuit breaker on timeout/unavailability | Sync |
 
 No synchronous outbound dependency on any other **platform** service — the verified-purchase gate deliberately uses event-carried state transfer instead of a live call to Order, to avoid coupling Review's write-path availability to Order's. Not a participant in the Order Saga (BRD §12). The one true synchronous dependency (the content-safety classifier) is external/cross-cutting infrastructure, not a platform bounded-context peer, and is designed to fail safe (to the human moderation queue), never open.

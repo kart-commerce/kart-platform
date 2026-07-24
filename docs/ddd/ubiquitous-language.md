@@ -339,3 +339,27 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | UserId | kart-identity-service | `Review.userId` and `VerifiedPurchaseRecord.userId` are reference fields only; Review never models Identity's own account/credential aggregate |
 | Order / OrderId / OrderCreated / OrderDelivered | kart-order-service | `Review.orderId`/`VerifiedPurchaseRecord.orderId` are reference fields only; `OrderCreated` and `OrderDelivered` are consumed only to populate `VerifiedPurchaseRecord`'s eligibility projection — Review never models Order's own Saga/state machine |
 | Sku | kart-product-service | `Review.sku`/`ProductRating.sku` are reference fields only; Review never models Product's own catalog aggregate |
+
+## Owned by `kart-recommendation-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| ProductAffinity | The per-anchor-SKU row of the item-based collaborative-filtering co-occurrence matrix, built solely from `OrderDelivered`; identified by `anchorSku` | Aggregate root |
+| RelatedSkuAffinity | One `{relatedSku, recentOrderIds, confirmedCount}` entry within a `ProductAffinity`, redelivery-idempotent by construction via `recentOrderIds`'s set-add-by-`orderId` mechanism | Value object |
+| UserBehaviorProfile | The per-user, time-decayed view/click/search behavioral-signal aggregate, built solely from `ProductViewed`/`ProductClicked`/`SearchPerformed`; identified by `userId` | Aggregate root |
+| SkuBehaviorScore | One `{sku, viewScore, clickScore, lastEventAt}` entry within a `UserBehaviorProfile` | Value object |
+| TrendingPool | The singleton, periodically-recomputed global popularity/fallback candidate list used for cold-start users and to seed newly catalogued products | Aggregate root |
+| RecommendationSet | The precomputed, per-user, wholesale-replaced served recommendation list `GET /recommendations/{userId}` reads; identified by `userId` | Aggregate root |
+| RecommendedItem | One `{sku, score, source}` entry within a `RecommendationSet` | Value object |
+| ProductViewed | Domain event (new, formalized here — publisher is the Client Event Ingestion Gateway, infrastructure, not a bounded context): a product detail view | Domain event |
+| ProductClicked | Domain event (new, formalized here, same publisher as above): a click-through on a product | Domain event |
+| SearchPerformed | Domain event (new, formalized here, same publisher as above): a search query and its result SKUs | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-recommendation-service` uses it |
+|---|---|---|
+| Sku / Product / Variant | kart-product-service | `ProductAffinity`/`TrendingPool`/`RecommendationSet` reference SKUs opaquely; live discontinued-status filtering (`GET /products/{id}`) never models Product's own catalog aggregate |
+| UserId | kart-identity-service | Every `userId` field is a reference only; never models authentication or session state |
+| Order / OrderDelivered | kart-order-service | Consumed only as the purchase-signal trigger; never models Order's own Saga/state machine |
+| WarehouseStock | kart-inventory-service | Consulted only for live stock-level filtering at read time; never models Inventory's own reservation aggregate |

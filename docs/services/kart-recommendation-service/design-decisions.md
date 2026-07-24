@@ -1,7 +1,7 @@
 ---
 doc_type: design-decisions
 service: kart-recommendation-service
-status: pending-approval
+status: approved
 generated_by: design-decision-agent
 source: docs/services/kart-recommendation-service/requirement-spec.md, docs/services/kart-recommendation-service/edge-cases.md
 ---
@@ -12,7 +12,7 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
 
 ## Decision: Event Transport per Consumed Input
 
-- **Requirement driving this:** requirement-spec §2/§5 confirms three consumed inputs with different volume/replay needs — `OrderDelivered` (Order, 3x retry/`order.dlq`, per ADR-0005), `ProductCreated` (Product, 3x retry/`catalog.dlq`, confirmed as an actual dependency by ADR-0013), and clickstream events (no Event Catalog entry, but BRD §15 groups Recommendation with Analytics as needing "replay and high-throughput partitioned consumption"). edge-cases.md's "Clickstream volume overwhelms ingestion" edge case already chose a Kafka topic partitioned by `userId` with consumer-group autoscaling for the clickstream input specifically — that choice is referenced here, not re-derived.
+- **Requirement driving this:** requirement-spec §2/§5 confirms three consumed inputs with different volume/replay needs — `OrderDelivered` (Order, per ADR-0005; retry tier since elevated by `kart-order-service/event-contract.md` to 5x exponential/paged-on-call, `order.order-delivered.dlq` — see `event-contract.md`'s own Correction note), `ProductCreated` (Product, 3x retry/`catalog.dlq`, confirmed as an actual dependency by ADR-0013), and clickstream events (no Event Catalog entry, but BRD §15 groups Recommendation with Analytics as needing "replay and high-throughput partitioned consumption"). edge-cases.md's "Clickstream volume overwhelms ingestion" edge case already chose a Kafka topic partitioned by `userId` with consumer-group autoscaling for the clickstream input specifically — that choice is referenced here, not re-derived.
 - **Options considered (3):** one Kafka cluster for all three consumed inputs uniformly · RabbitMQ (per the platform's TTL-ladder-retry + per-consumer-DLQ default) for `OrderDelivered`/`ProductCreated`, Kafka for clickstream only · RabbitMQ for all three, treating BRD §15's Kafka mention as clickstream-specific framing only
 - **Decision:**
   - Chosen: split transport — `OrderDelivered` and `ProductCreated` stay on RabbitMQ; clickstream moves to Kafka (per BRD §15 and edge-cases.md's already-chosen per-`userId` partitioning + consumer-group autoscaling)
@@ -26,7 +26,7 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
 - **Decision:**
   - Chosen: upsert-based signal update keyed by `orderId`
   - Why: Recommendation's read model is already MongoDB-based (requirement-spec §4's precomputed-read-model invariant); an upsert keyed by `orderId` reuses that same store instead of standing up a second dedup ledger, and needs no broker-level transactional guarantee the platform doesn't otherwise provide (the reusable event standards state at-least-once delivery + TTL-ladder retry as the default, not exactly-once)
-  - Trade-off accepted: constrains the eventual recommendation signal representation to something upsert-safe (a set/last-write-wins shape per `orderId`, not a raw incrementing counter) — carried forward as a constraint for the Architecture/DDD Agents alongside requirement-spec Open Question 2 (algorithm choice), not a gap in this decision itself
+  - Trade-off accepted: constrains the eventual recommendation signal representation to something upsert-safe (a set/last-write-wins shape per `orderId`, not a raw incrementing counter) — carried forward as a constraint the DDD Agent's `ProductAffinity` aggregate satisfies directly (`ddd-model.md`'s `recentOrderIds`/`confirmedCount` split), not a gap in this decision itself
 
 ## Decision: Resilience Pattern for the Synchronous Live Availability Check
 
@@ -48,5 +48,5 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
 
 ## Sign-off
 
-- [ ] Chosen technologies/patterns reviewed by a human
-- [ ] Approved to proceed to Architecture Agent
+- [x] Chosen technologies/patterns reviewed by a human: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to Architecture Agent

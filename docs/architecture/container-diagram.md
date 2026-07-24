@@ -43,7 +43,8 @@ graph TB
 
     Order -. OrderDelivered .-> Recommendation
     Product -. ProductCreated .-> Recommendation
-    ClickstreamSource[Clickstream event source<br/>publisher not yet named] -. "clickstream event(s), not yet named" .-> Recommendation
+    ClickstreamSource[Client Event Ingestion Gateway<br/>infra, not a bounded-context service] -. "ProductViewed / ProductClicked / SearchPerformed (Kafka, kart.recommendation.clickstream-events)" .-> Recommendation
+    ClickstreamSource -. "same topic, full fan-in (ADR-0004)" .-> Analytics
     Recommendation -->|"sync, GET /inventory/{sku}, fails open on timeout"| Inventory
     Recommendation -->|"sync, GET /products/{id}, fails open on timeout"| Product
 
