@@ -1182,8 +1182,8 @@ graph LR
 | **Naming** | Services: `kart-<noun>-service`; events: `<Entity><PastTenseVerb>` (e.g., `OrderCreated`); routing keys: `service.entity.action` |
 | **Folder Structure** | Clean Architecture layers (`Api/Application/Domain/Infrastructure`) + Vertical Slices inside `Application` (one folder per use case, not one folder per technical layer) |
 | **Clean Code / SOLID / Design Patterns** | SOLID as the non-negotiable baseline; constructor-injected dependencies only, no service locators; a reach-for-this pattern table (Strategy/Factory/Decorator/Specification/Mediator/Repository/Adapter) tied to the problem shape, not applied by default; DRY only after a third duplicate, never from two |
-| **Logging** | Structured JSON only; mandatory fields: `traceId`, `service`, `level`, entity id relevant to the operation |
-| **Observability** | RED metrics per service; W3C Trace Context propagated through HTTP and message headers; 100% trace coverage on the order path |
+| **Logging** | Structured JSON only; mandatory fields: `traceId`, `service`, `level`, entity id relevant to the operation. Tooling: Serilog (structured JSON sink) + OpenTelemetry (trace/span injection) → Grafana Loki (aggregation/query), mandatory in every service, no substitutions without an ADR |
+| **Observability** | RED metrics per service; W3C Trace Context propagated through HTTP and message headers; 100% trace coverage on the order path. Tooling: Prometheus (metrics) + Tempo (tracing) + Grafana (dashboards + alerting) — the Grafana LGTM stack, one OTel SDK across all services, mandatory in every service, no substitutions without an ADR |
 | **Versioning** | Semantic Versioning for all published packages/contracts; API versioned via URL prefix (`/v1/`) |
 | **Error Handling** | Result/Either pattern for domain errors, exceptions reserved for truly exceptional (infra) failures; no silent catch-and-continue |
 | **Resilience** | Circuit breaker on every synchronous outbound call; bounded exponential-backoff retry on idempotent operations only; bulkhead isolation per dependency; explicit timeout budgets; degrade gracefully rather than cascade |
