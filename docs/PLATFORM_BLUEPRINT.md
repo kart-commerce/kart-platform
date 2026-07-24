@@ -1154,7 +1154,7 @@ sequenceDiagram
 
 ## 14. Agent Communication Flow
 
-Agents do not call each other directly (no agent-to-agent RPC mesh) — they communicate exclusively through the Orchestrator's job queue and shared state (KB + Memory), the same decoupling principle the BRD applies to Kart's own services (topic exchange, publishers don't know consumers).
+Agents do not call each other directly (no agent-to-agent RPC mesh) — they communicate exclusively through the Orchestrator's job queue and shared state (KB + Memory), the same decoupling principle the BRD applies to Kart's own services (each service's own topic exchange, publishers don't know consumers — BRD §8).
 
 ```mermaid
 graph LR
@@ -1194,7 +1194,7 @@ graph LR
 | **AuthN/AuthZ** | OAuth2 Authorization Code (user-facing), Client Credentials (service-to-service); scope-based authorization |
 | **REST** | Resource-oriented URLs, standard verbs/status codes, `Idempotency-Key` header mandatory on money-moving POSTs |
 | **gRPC** | Reserved for internal high-throughput sync calls only (e.g., Inventory reserve check), never public-facing |
-| **RabbitMQ** | Topic exchange convention per BRD §8; per-service DLQ; TTL-ladder retry, never immediate requeue-loop |
+| **RabbitMQ** | One topic exchange per publishing service, no shared exchange, per BRD §8; per-service DLX/DLQ; TTL-ladder retry, never immediate requeue-loop |
 | **Kafka** | Adopted per-consumer-group via strangler migration (BRD §15), never wholesale; partition key = aggregate id for ordering |
 | **Redis** | Cache-aside for reads, write-through for pricing/promo; key convention `service:entity:id[:shard]` |
 | **MongoDB** | Denormalized read models; shard key chosen for even distribution + query locality, documented in Database Memory |

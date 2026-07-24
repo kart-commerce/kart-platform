@@ -130,7 +130,7 @@ CREATE TABLE inventory_outbox_events (
     aggregate_ref  TEXT NOT NULL,      -- reservation_id for the first three; (warehouse_id, sku) for InventoryReplenished
     payload        JSONB NOT NULL,
     occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
-    published_at   TIMESTAMPTZ NULL,   -- set only by the Outbox relay after a successful publish to ecommerce.events
+    published_at   TIMESTAMPTZ NULL,   -- set only by the Outbox relay after a successful publish to inventory.exchange
     created_by     TEXT NOT NULL,      -- BRD §24.3: the principal whose domain mutation produced this outbox row (Order Service's client identity, a system:* id, or Admin's operator identity, matching the source write)
     updated_by     TEXT NOT NULL DEFAULT 'system:inventory-outbox-relay' -- BRD §24.3: the Outbox relay is the only process that ever updates a row after insert (setting published_at)
 );

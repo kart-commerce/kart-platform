@@ -8,7 +8,7 @@ source: docs/services/kart-order-service/ddd-model.md, docs/services/kart-order-
 
 # Event Contract: kart-order-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue gets its own DLQ per the reusable event standard — never shared, superseding BRD §10's simplified shared `order.dlq` label the same way `kart-offer-service/event-contract.md` already did for its own events.
+Exchange: `order.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue gets its own DLQ per the reusable event standard — never shared, superseding BRD §10's simplified shared `order.dlq` label the same way `kart-offer-service/event-contract.md` already did for its own events.
 
 ## Published
 

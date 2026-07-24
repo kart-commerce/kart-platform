@@ -1,0 +1,32 @@
+{
+  "service": "kart-user-service",
+  "exchange": { "name": "user.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "user.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "user.identity-events.queue",
+      "bindings": [
+        { "exchange": "identity.exchange", "routingKey": "identity.user.registered" },
+        { "exchange": "identity.exchange", "routingKey": "identity.user-account.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "user.dlx",
+        "x-dead-letter-routing-key": "user.identity-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "user.identity-events.dlq", "bindings": [{ "exchange": "user.dlx", "routingKey": "user.identity-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "user.identity-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "user.identity-events.queue"
+      }
+    }
+  ],
+  "_comment": "User publishes UserProfileUpdated/UserNotificationPreferenceUpdated/UserDataErased onto user.exchange (own topology, not shown — Analytics/Notification/Order/Review/Recommendation/Wishlist/Identity/Cart each bind their own queue to it, UserDataErased being the platform's widest-fanout compliance event per ADR-0016)."
+}

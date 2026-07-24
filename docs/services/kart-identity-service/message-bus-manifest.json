@@ -1,0 +1,31 @@
+{
+  "service": "kart-identity-service",
+  "exchange": { "name": "identity.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "identity.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "identity.user-events.queue",
+      "bindings": [
+        { "exchange": "user.exchange", "routingKey": "user.data-erased" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "identity.dlx",
+        "x-dead-letter-routing-key": "identity.user-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "identity.user-events.dlq", "bindings": [{ "exchange": "identity.dlx", "routingKey": "identity.user-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "identity.user-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "identity.user-events.queue"
+      }
+    }
+  ],
+  "_comment": "Identity publishes UserRegistered/SessionCreated/UserAccountUpdated onto identity.exchange (own topology, not shown — User/Notification/Analytics bind their own queues to it)."
+}

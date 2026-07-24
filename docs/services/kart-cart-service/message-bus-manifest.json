@@ -1,0 +1,42 @@
+{
+  "service": "kart-cart-service",
+  "exchange": { "name": "cart.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "cart.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "cart.inventory-events.queue",
+      "bindings": [
+        { "exchange": "inventory.exchange", "routingKey": "inventory.reservation.failed" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "cart.dlx",
+        "x-dead-letter-routing-key": "cart.inventory-events.dlq"
+      }
+    },
+    {
+      "name": "cart.user-events.queue",
+      "bindings": [
+        { "exchange": "user.exchange", "routingKey": "user.data-erased" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "cart.dlx",
+        "x-dead-letter-routing-key": "cart.user-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "cart.inventory-events.dlq", "bindings": [{ "exchange": "cart.dlx", "routingKey": "cart.inventory-events.dlq" }] },
+    { "name": "cart.user-events.dlq", "bindings": [{ "exchange": "cart.dlx", "routingKey": "cart.user-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "cart.user-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "cart.user-events.queue"
+      }
+    }
+  ],
+  "_comment": "Cart publishes CartCheckedOut onto cart.exchange (own topology, not shown — Analytics binds its own queue to it)."
+}

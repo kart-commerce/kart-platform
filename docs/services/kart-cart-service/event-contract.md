@@ -8,7 +8,7 @@ source: docs/services/kart-cart-service/requirement-spec.md, docs/services/kart-
 
 # Event Contract: kart-cart-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
+Exchange: `cart.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
 ## Pipeline Note (resolved)
 

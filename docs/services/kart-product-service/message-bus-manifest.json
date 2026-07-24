@@ -1,0 +1,32 @@
+{
+  "service": "kart-product-service",
+  "exchange": { "name": "product.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "product.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "product.review-events.queue",
+      "bindings": [
+        { "exchange": "review.exchange", "routingKey": "review.review.submitted" },
+        { "exchange": "review.exchange", "routingKey": "review.review.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "product.dlx",
+        "x-dead-letter-routing-key": "product.review-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "product.review-events.dlq", "bindings": [{ "exchange": "product.dlx", "routingKey": "product.review-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "product.review-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "product.review-events.queue"
+      }
+    }
+  ],
+  "_comment": "Product publishes ProductCreated/ProductPriceChanged/ProductUpdated/ProductDiscontinued onto product.exchange (own topology, not shown — Search/Recommendation/Wishlist/Offer/Analytics each bind their own per-consumer-group queue to it, per design-decisions.md's Bulkhead Isolation decision)."
+}

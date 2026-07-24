@@ -8,7 +8,7 @@ source: docs/services/kart-offer-service/ddd-model.md, docs/services/kart-offer-
 
 # Event Contract: kart-offer-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
+Exchange: `offer.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard — never shared.
 
 | Event | Routing Key | Published/Consumed | Key Fields | Retry | DLQ | Criticality Justification |
 |---|---|---|---|---|---|---|

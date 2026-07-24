@@ -13,7 +13,7 @@ Concrete choices for this platform, layered on top of the project-agnostic stand
 ## Naming
 
 - Service repos: `kart-<noun>-service`, e.g. `kart-offer-service`.
-- RabbitMQ topic exchange: `ecommerce.events`.
+- RabbitMQ: one topic exchange per publishing service, `<service>.exchange` (e.g. `order.exchange`, `payment.exchange`) — no shared exchange. Each service also owns its own DLX (`<service>.dlx`) and retry ladder (`<service>.retry.5s`/`.30s`/`.5m`). Full topology and rationale: [kart-requirements.md §8](../requirements/kart-requirements.md); per-service manifest shape: §9 there.
 - Kafka topics: `kart.<service>.<entity>`, e.g. `kart.analytics.order-events`.
 - Ticket prefixes: `OFF-` (Offer), `ORD-` (Order), and similarly per bounded context.
 - CI: service repos call the reusable workflow published from `kart-devops`.

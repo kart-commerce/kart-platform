@@ -98,7 +98,7 @@ CREATE TABLE category_outbox_events (
     occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
     published_at    TIMESTAMPTZ NULL,
                             -- set only by the Outbox relay after a successful publish to
-                            -- ecommerce.events with the 3x retry / catalog.dlq policy (BRD §10, ADR-0008)
+                            -- category.exchange with the 3x retry / catalog.dlq policy (BRD §10, ADR-0008)
     created_by      TEXT NOT NULL,      -- BRD §24.3: the Admin operator/client identity whose taxonomy write produced this outbox row
     updated_by      TEXT NOT NULL DEFAULT 'system:category-outbox-relay' -- BRD §24.3: the Outbox relay is the only process that ever updates a row after insert (setting published_at)
 );

@@ -8,7 +8,7 @@ source: docs/services/kart-product-service/ddd-model.md, docs/services/kart-prod
 
 # Event Contract: kart-product-service
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared**, including across this event's own multiple different consumer services (design-decisions.md's "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already requires per-consumer-group queues; this contract names the DLQ for each).
+Exchange: `product.exchange` (RabbitMQ topic exchange, owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared**, including across this event's own multiple different consumer services (design-decisions.md's "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already requires per-consumer-group queues; this contract names the DLQ for each).
 
 ## Published Events
 
@@ -29,7 +29,7 @@ All four published events sit at the platform's standard catalog tier (3x retry,
 
 ### Bulkhead Isolation — Per-Consumer-Group DLQs, Not One Shared `catalog.dlq`
 
-BRD §10's `catalog.dlq` label (restated in requirement-spec §3's NFR table) is the **retry-tier name**, not a literal single physical queue — the same reconciliation `kart-delivery-tracking-service/event-contract.md` and `kart-category-service/event-contract.md` already made for their own BRD-simplified shared DLQ labels, and exactly the topology design-decisions.md's own "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already calls for: one queue and DLQ per consumer group under `ecommerce.events`, so one slow consumer (e.g. Search re-indexing during a bulk catalog load) can never back up or block Recommendation's, Wishlist's, Offer's, or Analytics' own independent consumption of the same event (edge-cases.md "High fan-out on every publish risks one slow consumer blocking others"; BRD §14). The retry **count** (3x) is unchanged from BRD §10 — only the shared queue label is corrected, per consumer group, for every event in this table.
+BRD §10's `catalog.dlq` label (restated in requirement-spec §3's NFR table) is the **retry-tier name**, not a literal single physical queue — the same reconciliation `kart-delivery-tracking-service/event-contract.md` and `kart-category-service/event-contract.md` already made for their own BRD-simplified shared DLQ labels, and exactly the topology design-decisions.md's own "Resilience Pattern — Bulkhead Isolation for High-Fan-Out Catalog Events" decision already calls for: one queue and DLQ per consumer group under `product.exchange`, so one slow consumer (e.g. Search re-indexing during a bulk catalog load) can never back up or block Recommendation's, Wishlist's, Offer's, or Analytics' own independent consumption of the same event (edge-cases.md "High fan-out on every publish risks one slow consumer blocking others"; BRD §14). The retry **count** (3x) is unchanged from BRD §10 — only the shared queue label is corrected, per consumer group, for every event in this table.
 
 ## Payload Resolution
 

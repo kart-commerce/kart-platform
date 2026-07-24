@@ -1,0 +1,68 @@
+{
+  "service": "kart-order-service",
+  "exchange": { "name": "order.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "order.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "order.inventory-events.queue",
+      "bindings": [
+        { "exchange": "inventory.exchange", "routingKey": "inventory.reservation.reserved" },
+        { "exchange": "inventory.exchange", "routingKey": "inventory.reservation.failed" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "order.dlx",
+        "x-dead-letter-routing-key": "order.inventory-events.dlq"
+      }
+    },
+    {
+      "name": "order.payment-events.queue",
+      "bindings": [
+        { "exchange": "payment.exchange", "routingKey": "payment.intent.completed" },
+        { "exchange": "payment.exchange", "routingKey": "payment.intent.failed" },
+        { "exchange": "payment.exchange", "routingKey": "payment.chargeback.received" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "order.dlx",
+        "x-dead-letter-routing-key": "order.payment-events.dlq"
+      }
+    },
+    {
+      "name": "order.shipping-events.queue",
+      "bindings": [
+        { "exchange": "shipping.exchange", "routingKey": "shipping.shipment.dispatched" },
+        { "exchange": "shipping.exchange", "routingKey": "shipping.shipment.creation-failed" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "order.dlx",
+        "x-dead-letter-routing-key": "order.shipping-events.dlq"
+      }
+    },
+    {
+      "name": "order.tracking-events.queue",
+      "bindings": [
+        { "exchange": "tracking.exchange", "routingKey": "tracking.delivery-status.updated" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "order.dlx",
+        "x-dead-letter-routing-key": "order.tracking-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "order.inventory-events.dlq", "bindings": [{ "exchange": "order.dlx", "routingKey": "order.inventory-events.dlq" }] },
+    { "name": "order.payment-events.dlq", "bindings": [{ "exchange": "order.dlx", "routingKey": "order.payment-events.dlq" }] },
+    { "name": "order.shipping-events.dlq", "bindings": [{ "exchange": "order.dlx", "routingKey": "order.shipping-events.dlq" }] },
+    { "name": "order.tracking-events.dlq", "bindings": [{ "exchange": "order.dlx", "routingKey": "order.tracking-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "order.payment-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "order.payment-events.queue"
+      }
+    }
+  ],
+  "_comment": "Order's own published events (OrderCreated, OrderConfirmed, OrderCancelled, OrderCompensationTriggered, OrderDelivered — all 5x exponential, paged on-call per event-contract.md) are published onto order.exchange; consumers (Payment, Notification, Review, Analytics, Shipping, Inventory, Offer, Recommendation) each declare their own queues bound to it, not shown here."
+}

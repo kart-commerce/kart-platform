@@ -12,7 +12,7 @@ source: docs/services/kart-delivery-tracking-service/requirement-spec.md, docs/s
 
 `requirement-spec.md`, `edge-cases.md`, `ddd-model.md`, `design-decisions.md`, `architecture.md`, and `database-design.md` are all `status: approved` — every item that was open in an earlier pass (the carrier-webhook ingestion contract, ETA computation, the `ShipmentDispatched` creation-trigger relationship, the `200`-vs-`202` `GET /tracking/{id}` response contract) is closed with no stale "Open Question" reference remaining, and all six documents are internally consistent with each other. This contract is derived directly from `ddd-model.md`'s already-decided domain-event list (its "Domain events" per aggregate) rather than re-deciding aggregate shape.
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared** — including this service's own two brand-new internal events, which is exactly the point requirement-spec §6 item 4(b)'s loose phrasing needs correcting on (see "Internal-Only Events," below).
+Exchange: `tracking.exchange` (RabbitMQ topic exchange, owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — **never shared** — including this service's own two brand-new internal events, which is exactly the point requirement-spec §6 item 4(b)'s loose phrasing needs correcting on (see "Internal-Only Events," below).
 
 ## Published Events
 

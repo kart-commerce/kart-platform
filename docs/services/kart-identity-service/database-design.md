@@ -287,7 +287,7 @@ CREATE TABLE outbox_events (
     event_type     TEXT NOT NULL CHECK (event_type IN ('UserRegistered', 'SessionCreated', 'UserAccountUpdated')),
     payload        JSONB NOT NULL,
     occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
-    published_at   TIMESTAMPTZ NULL,               -- set only by the Outbox poller after a successful publish to ecommerce.events (kart-conventions.md)
+    published_at   TIMESTAMPTZ NULL,               -- set only by the Outbox poller after a successful publish to identity.exchange (kart-conventions.md)
     created_by     TEXT NOT NULL,                  -- the principal whose domain mutation produced this outbox row (the acting user_id for UserRegistered/UserAccountUpdated, or the authenticating user_id for SessionCreated)
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped when published_at is set
     updated_by     TEXT NOT NULL DEFAULT 'system:identity-outbox-poller' -- the Outbox poller is the only process that ever updates a row after insert

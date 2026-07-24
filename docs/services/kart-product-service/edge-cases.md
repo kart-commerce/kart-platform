@@ -44,7 +44,7 @@ source: docs/services/kart-product-service/requirement-spec.md
 - **Why it happens:** BRD §14 names this exact failure mode generally ("Throughput ceiling under heavy fan-out... 10+ consumer groups per event multiplies effective message rate").
 - **Solutions available (3):** Per-consumer-group queue and DLQ under the shared topic exchange (BRD §8's stated default topology) · Single shared queue fanned to all consumers · Move high-fan-out catalog events to Kafka ahead of the general Analytics-first migration order (BRD §15).
 - **Decision (3-5 bullets max):**
-  - Chosen: Per-consumer-group queue/DLQ under `ecommerce.events`.
+  - Chosen: Per-consumer-group queue/DLQ under `product.exchange`.
   - Why: this is already the platform's stated default (BRD §8: "Queue per Consumer Group... Each service owns its own queue"; §8.3 explicitly rejects the shared-queue option: "one slow consumer blocks all others").
   - Trade-off accepted: still bounded by RabbitMQ's overall fan-out throughput ceiling (BRD §14) — only defers, doesn't eliminate, an eventual Kafka move for catalog events if volume grows enough.
 
