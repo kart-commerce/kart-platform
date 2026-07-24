@@ -196,6 +196,30 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | UserId / UserDataErased | kart-identity-service / kart-user-service | `CartOwner` references a `UserId` issued by Identity (BRD §2.1 item 1); Cart never models authentication, token issuance, or session lifecycle itself. Consuming `UserDataErased` (ADR-0016, updated to name Cart) deletes every Cart owned by that `UserId` — Cart never models the erasure workflow itself, only reacts to it |
 | Order | kart-order-service | `CartCheckedOut` is published for Analytics only; Cart never models Order's own Saga/state machine, and Order's creation trigger (`POST /orders`) bypasses Cart entirely |
 
+## Owned by `kart-payment-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| PaymentIntent | The authoritative record of a single charge's lifecycle (`Pending`/`Completed`/`Failed`/`Disputed`); never delegated to or duplicated inside the Order Saga's own state machine | Aggregate root |
+| Refund | A (possibly partial) reversal against a `PaymentIntent`'s `CapturedAmount`; a child of `PaymentIntent`, not its own aggregate, since the refund-ceiling invariant must be checked atomically against the same row it belongs to | Entity |
+| GatewayToken | The opaque, gateway-issued reference to tokenized card data a `PaymentIntent` holds; raw card data is never persisted | Value object |
+| CapturedAmount | The `{ amount, currency }` ceiling every `Refund` under a `PaymentIntent` is checked against | Value object |
+| PaymentIntentStatus | The `Pending`/`Completed`/`Failed`/`Disputed` state machine a `PaymentIntent` moves through; monotonic — once terminal, only the single `Completed → Disputed` escalation is accepted | Value object |
+| ChargebackRecord | The single, overwritable `{ chargebackId, amount, reason, receivedAt }` record set on a `PaymentIntent` when a chargeback is ingested (ADR-0012's minimal "stop the bleeding" scope, not a full dispute-lifecycle history) | Value object |
+| IdempotencyRecord | The reservation-then-confirmation ledger entry for one `(idempotencyKey, endpoint)` pair, bridging the non-transactional external gateway call between reserving a charge/refund attempt and confirming its outcome | Aggregate root |
+| IdempotencyKeyScope | The `{ idempotencyKey, endpoint }` composite identity an `IdempotencyRecord` is uniquely keyed on — scoped so a charge-key and a refund-key can't collide on the same caller-supplied value | Value object |
+| GatewayWebhookEvent | The idempotency ledger entry recognizing a duplicate or out-of-order asynchronous gateway confirmation (charge/refund settlement, chargeback notification) by the gateway's own event id; mirrors `kart-delivery-tracking-service`'s `WebhookDedupEntry` for the payment-gateway analogue | Aggregate root |
+| PaymentCompleted | Domain event: fired exactly once when a `PaymentIntent` reaches `Completed` | Domain event |
+| PaymentFailed | Domain event: fired exactly once when a `PaymentIntent` reaches `Failed`; never fired speculatively while the gateway outcome is still ambiguous | Domain event |
+| RefundIssued | Domain event: fired once per successful `Refund`, carrying that `Refund`'s own id/amount — one event per partial refund | Domain event |
+| ChargebackReceived | Domain event (ADR-0012, new — not previously named in the BRD): fired once a chargeback notification is ingested and `ChargebackRecord`/`Disputed` are set | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-payment-service` uses it |
+|---|---|---|
+| Order (`orderId`) | kart-order-service | Every `PaymentIntent`/event carries `orderId` as an opaque reference only; Payment never models Order's own Saga/state machine, only reacts to `OrderCreated` and accepts a direct compensating-refund call from Order as Saga orchestrator |
+
 ## Owned by `kart-wishlist-service`
 
 | Term | Definition | Kind |
@@ -212,3 +236,146 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | Sku / Variant / ProductDiscontinued | kart-product-service | `WishlistEntry.sku` is a reference only; `ProductDiscontinued` (consumed) transitions a WishlistEntry to `Stale`, never redefined locally |
 | UserId / UserDataErased | kart-user-service / kart-identity-service | `WishlistEntry.userId` is an opaque reference; consuming `UserDataErased` (ADR-0016) deletes every WishlistEntry for that `userId` — Wishlist never models identity or erasure workflow beyond reacting to this event |
 | InventoryReservationFailed | kart-inventory-service | Consumed only to flag a `CartLineItem`'s availability pre-checkout; Cart never models Inventory's own reservation aggregate |
+
+## Owned by `kart-order-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Order | The single authoritative record of an order's lifecycle/Saga state — the platform's sole Saga orchestrator (BRD §5.1); no other service or in-memory process manager is ever more authoritative | Aggregate root |
+| OrderLineItem | One `(sku, qty, unitPrice)` line within an Order, created and persisted only alongside its parent — no per-item shipment state (no split-shipment support, requirement-spec Open Question resolution #4) | Entity |
+| OrderEvent | An append-only row per state transition, doubling as both the audit trail and the Outbox relay row (`order_events` doubles as the Outbox table, requirement-spec Open Question resolution #5); carries `OrderEventSequence` for per-order ordering | Entity |
+| OrderStatus | The `Created \| Reserved \| Paid \| Shipped \| Delivered \| FulfillmentException \| Cancelled \| Refunded` lifecycle state machine; the compare-and-swap field for every transition (design-decisions.md) | Value object |
+| FulfillmentException | The non-terminal, distinguishable hold state entered from `Paid` on consuming `ShipmentCreationFailed` (ADR-0015); resolved only by an explicit manual/ops action, back to `Paid` or on to `Cancelled` | Value (an `OrderStatus` value, not a separate type) |
+| IdempotencyKey | The client-supplied `Idempotency-Key` header value on `POST /orders`, unique per Order; lives directly on the aggregate (no separate ledger, unlike Payment's `IdempotencyRecord`) since no external call sits between reserving it and committing the order | Value object |
+| OrderCreated | Domain event: fired on `Created`, the initial commit of `POST /orders` | Domain event |
+| OrderConfirmed | Domain event: fired on `Reserved → Paid`, as soon as `PaymentCompleted` is received (ADR-0002) — not gated on shipment creation | Domain event |
+| OrderCancelled | Domain event: fired once the order reaches the terminal `Cancelled` state | Domain event |
+| OrderCompensationTriggered | Domain event: fired at the start of any compensation sequence (pre-confirmation `PaymentFailed`, client-initiated cancel, `FulfillmentException`-to-`Cancelled`, or a `ChargebackReceived`-driven Inventory-release attempt) — one mechanism reused across all four triggers | Domain event |
+| OrderDelivered | Domain event: fired on `Shipped → Delivered`, the sole terminal-delivery signal unifying the BRD's earlier `OrderCompleted`/`OrderDelivered` naming (ADR-0005) | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-order-service` uses it |
+|---|---|---|
+| Reservation / `reservationId` | kart-inventory-service | Referenced only via `POST /inventory/reserve`'s response and `InventoryReserved`/`InventoryReservationFailed`/`InventoryReleased` payloads; Order never models Inventory's own `WarehouseStock`/`Reservation` aggregate |
+| PaymentIntent / `paymentIntentId` | kart-payment-service | Referenced only via `PaymentCompleted`/`PaymentFailed`/`ChargebackReceived` payloads and the `POST /payments/{id}/refund` call; Order never models Payment's own charge/refund/dispute state machine |
+| Shipment / `ShipmentDispatched` / `ShipmentCreationFailed` | kart-shipping-service | Consumed only as status signals (dispatch confirmation, terminal fulfillment failure); Order never models Shipping's own carrier/label aggregate |
+| TrackingRecord / `DeliveryStatusUpdated` | kart-delivery-tracking-service | Consumed only for its terminal "delivered" status value; Order never models Delivery Tracking's own tracking-history aggregate |
+
+## Owned by `kart-shipping-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Shipment | The single authoritative record of one order's fulfillment attempt — carrier selection through label generation; created only by consuming `OrderConfirmed`, unique per `orderId` (at most one `Shipment` per `Order`) | Aggregate root |
+| ShipmentStatus | The `Pending \| Dispatched \| Failed` state machine a `Shipment` moves through; `Pending` is the only non-terminal value, entered when the shipment-intent row commits, resolved out-of-band once the carrier interaction completes — monotonic, no transition out of either terminal value | Value object |
+| Carrier | The carrier that actually produced a valid label for a `Shipment`; nullable until `Dispatched`, set exactly once by the carrier attempt that succeeds — the `carrier` field on `ShipmentDispatched`'s payload. Distinct from `kart-delivery-tracking-service`'s own `CarrierId` (a webhook-routing/adapter concern), not a re-owned or renamed version of it | Value object |
+| CarrierSelectionPolicy | The ordered, externally-configured carrier priority list (primary, then secondary on the primary's circuit tripping) a shipment's carrier-selection attempt walks through; deliberately not a computed cheapest/fastest/contracted-rate business rule, since the BRD gives no such criteria (`ddd-model.md` Modeling Decision #2) | Value object |
+| FailureReason | The nullable reason a `Shipment` reaches `Failed` — set once all configured carrier options are exhausted (address-validation failure or no carrier services the destination); the `reason` field on `ShipmentCreationFailed`'s payload | Value object |
+| ShipmentDispatched | Domain event: fired exactly once when a `Shipment` reaches `Dispatched`, carrying `orderId, carrier, trackingId`; consumed by Order, Notification, Delivery Tracking, Analytics | Domain event |
+| ShipmentCreationFailed | Domain event (ADR-0015, new — not previously named in the BRD): fired exactly once when a `Shipment` reaches `Failed`, carrying `orderId, reason`; consumed by Order, Notification, Analytics | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-shipping-service` uses it |
+|---|---|---|
+| Order / `OrderId` | kart-order-service | `Shipment.orderId` is a reference field only, and the natural unique business key `Shipment` is keyed on; Shipping never models Order's own Saga/state machine |
+| OrderConfirmed | kart-order-service | Consumed as the sole shipment-creation trigger (payload `orderId, address`); Shipping never models Order's own confirmation logic, only reacts to it |
+| TrackingId | kart-delivery-tracking-service | Shipping is the value's origin (captured from the carrier's label-generation response and first published on `ShipmentDispatched`), but does not re-claim the term's glossary ownership from Tracking's own existing, already-approved entry — flagged explicitly in `ddd-model.md` Modeling Decision #5 as a known naming/ownership asymmetry, not silently worked around |
+
+## Owned by `kart-notification-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| NotificationAttempt | One channel-specific send attempt derived from a single consumed triggering event; the `(eventId, channel)` idempotency/audit boundary — the DB unique constraint on this key *is* the idempotency mechanism, not a pre-check (ADR-0003's resolved consumed-event scope) | Aggregate root |
+| NotificationAttemptKey | `{eventId, channel}` — the DB-unique-constraint-enforced idempotency key `NotificationAttempt` is identified by | Value object |
+| Channel | `Email \| SMS \| Push` — the delivery channel a `NotificationAttempt` targets | Value object |
+| TriggeringEventType | The name of the consumed event that caused a `NotificationAttempt` to exist (e.g. `OrderConfirmed`, `PaymentFailed`) — reference-only, never redefining the producing service's own event | Value object |
+| CriticalityTier | `Tier1` (5 attempts + paged) / `Tier2` (3 attempts) / `Tier3` (2 attempts) retry budget, snapshotted onto a `NotificationAttempt` at creation from `TriggeringEventType`, inherited verbatim from the triggering event's own already-catalogued tier | Value object |
+| NotificationCategory | The per-category classification (order-updates, payment, shipping, marketing/price-alerts, account) a `NotificationAttempt`'s opt-out check runs against | Value object |
+| DeliveryOutcome | `Pending \| Sent \| Failed \| Suppressed` — the monotonic, terminal outcome state of a `NotificationAttempt` | Value object |
+| AttemptCount | The number of physical delivery tries made against a `NotificationAttempt`'s `CriticalityTier` retry ceiling | Value object |
+| NotificationPreference | The local, eventually-consistent per-user opt-out/reachability projection, populated solely by consuming `UserNotificationPreferenceUpdated` (owned by `kart-user-service`) | Aggregate root |
+| OptOutMatrix | The full `{channel -> {category -> optedOut}}` map on a `NotificationPreference`, replaced wholesale on every consumed update, never partially patched | Value object |
+| AppInstalled | The boolean push-reachability flag on a `NotificationPreference` | Value object |
+| OrderUserIndex | Lookup projection (`orderId -> userId`), seeded solely from consuming `OrderCreated`; resolves `userId` for the seven consumed events that carry `orderId` but not `userId` (ADR-0020) — not an aggregate, no invariants beyond upsert-on-consume | Value object |
+| TrackingOrderIndex | Lookup projection (`trackingId -> orderId`), seeded solely from consuming `ShipmentDispatched`; chains `DeliveryStatusUpdated`'s `trackingId` to `OrderUserIndex` for the one consumed event carrying neither `userId` nor `orderId` (ADR-0020) | Value object |
+| NotificationSent | Domain event (existing BRD event, §10; previously unclaimed in the glossary, formally owned here): fired exactly once per terminal `NotificationAttempt`, carrying `userId, channel, status`; 1x fire-and-forget, consumed by Analytics only | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-notification-service` uses it |
+|---|---|---|
+| UserId | kart-identity-service | `NotificationAttempt.userId` and `NotificationPreference.userId` are reference fields only; Notification never models Identity's own account/credential aggregate |
+| OrderCreated / OrderConfirmed / OrderCancelled / OrderCompensationTriggered / OrderDelivered | kart-order-service | Consumed only as `NotificationAttempt` creation triggers; `OrderCreated` additionally seeds `OrderUserIndex` (ADR-0020) — Notification never models Order's own Saga/state machine |
+| PaymentCompleted / PaymentFailed / RefundIssued | kart-payment-service | Consumed only as `NotificationAttempt` creation triggers (Tier 1); Notification never models Payment's own charge/refund/dispute state machine |
+| ShipmentDispatched | kart-shipping-service | Consumed as a `NotificationAttempt` creation trigger and, additionally, seeds `TrackingOrderIndex` (ADR-0020); Notification never models Shipping's own carrier/label aggregate |
+| DeliveryStatusUpdated | kart-delivery-tracking-service | Consumed only as a `NotificationAttempt` creation trigger, resolved via `TrackingOrderIndex` -> `OrderUserIndex` (ADR-0020); Notification never models Tracking's own status-history/dedup aggregates |
+| WishlistPriceAlertTriggered | kart-wishlist-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 3); Notification never models Wishlist's own `WishlistEntry` aggregate |
+| UserRegistered | kart-identity-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 2, welcome email); independently also consumed by `kart-user-service`, no ordering dependency between the two consumers |
+| UserNotificationPreferenceUpdated | kart-user-service | Consumed only as the sole `NotificationPreference` creation/update trigger; Notification never models User's own coarse `notificationOptIn` field or `UserProfile` aggregate |
+
+## Owned by `kart-review-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Review | The single authoritative write-model record of one customer's opinion of one `(orderId, sku)` pair — submission, edit, retraction, and moderation outcome all resolve onto this one row | Aggregate root |
+| ReviewId | The stable identifier assigned to a Review at insert time; referenced by `ReviewSubmitted`'s payload and by `ProductRating`'s own idempotency ledger | Value object |
+| Rating | A `1..5` integer star value (engineering default — no BRD-stated scale, `ddd-model.md`) | Value object |
+| ModerationStatus | `PendingModeration \| Published \| Rejected \| Retracted` — the two-stage-moderation lifecycle state of a Review; `Rejected`/`Retracted` are both terminal, no transition exists between them | Value object |
+| PendingRevision | The staged `{newBodyText, newRating, submittedAt}` content of an edit submitted against an already-`Published` Review, held until the classifier/moderator clears or rejects it, leaving the currently-public content untouched in the meantime | Value object |
+| ProductRating | The canonical rating aggregate (`avg`/`count`) Review owns per [ADR-0014](../adr/0014-review-rating-aggregate-ownership.md), keyed by `Sku`; every other bounded context's own rating copy is a denormalized projection of this aggregate's own event stream | Aggregate root |
+| RatingAverage | The current `avg` on a `ProductRating`, maintained by weighted incremental adjustment, never a full recompute | Value object |
+| RatingCount | The current `count` on a `ProductRating` | Value object |
+| ProcessedReviewLedger | The `(orderId, sku) -> lastAppliedRating` idempotency ledger a `ProductRating` uses to dedupe `ReviewSubmitted`/`ReviewUpdated`/`ReviewUnpublished` under at-least-once redelivery | Value object |
+| VerifiedPurchaseRecord | The local, `orderId`-keyed lookup projection (not an aggregate) `POST /reviews`'s hard eligibility gate reads synchronously; populated by consuming `OrderCreated` (`userId`, `skus`) and `OrderDelivered` (`deliveredAt`) — two events, not one, since `OrderDelivered` alone does not carry `userId`/`sku` (`ddd-model.md`'s opening note) | Lookup projection |
+| ReviewSubmitted | Domain event (existing BRD §10 event, expanded payload per requirement-spec §6 Q5: `orderId, sku, rating, reviewId, userId`): fires exactly once per Review, the first time it ever becomes publicly visible | Domain event |
+| ReviewUpdated | Domain event (new, requirement-spec §6 Q3; payload `orderId, sku, oldRating, newRating`): fires for a rating-affecting change to a Review that was already public before the change; retry/DLQ tier not yet finalized (flagged for Event Design Agent) | Domain event |
+| ReviewUnpublished | Domain event (new, introduced at the DDD Agent stage): fires when a previously-public Review stops being public — author retraction or moderator post-hoc takedown, one event reused across both triggers; payload `orderId, sku, rating, reviewId, userId, reason`; retry/DLQ tier not yet finalized (flagged for Event Design Agent) | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-review-service` uses it |
+|---|---|---|
+| UserId | kart-identity-service | `Review.userId` and `VerifiedPurchaseRecord.userId` are reference fields only; Review never models Identity's own account/credential aggregate |
+| Order / OrderId / OrderCreated / OrderDelivered | kart-order-service | `Review.orderId`/`VerifiedPurchaseRecord.orderId` are reference fields only; `OrderCreated` and `OrderDelivered` are consumed only to populate `VerifiedPurchaseRecord`'s eligibility projection — Review never models Order's own Saga/state machine |
+| Sku | kart-product-service | `Review.sku`/`ProductRating.sku` are reference fields only; Review never models Product's own catalog aggregate |
+
+## Owned by `kart-recommendation-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| ProductAffinity | The per-anchor-SKU row of the item-based collaborative-filtering co-occurrence matrix, built solely from `OrderDelivered`; identified by `anchorSku` | Aggregate root |
+| RelatedSkuAffinity | One `{relatedSku, recentOrderIds, confirmedCount}` entry within a `ProductAffinity`, redelivery-idempotent by construction via `recentOrderIds`'s set-add-by-`orderId` mechanism | Value object |
+| UserBehaviorProfile | The per-user, time-decayed view/click/search behavioral-signal aggregate, built solely from `ProductViewed`/`ProductClicked`/`SearchPerformed`; identified by `userId` | Aggregate root |
+| SkuBehaviorScore | One `{sku, viewScore, clickScore, lastEventAt}` entry within a `UserBehaviorProfile` | Value object |
+| TrendingPool | The singleton, periodically-recomputed global popularity/fallback candidate list used for cold-start users and to seed newly catalogued products | Aggregate root |
+| RecommendationSet | The precomputed, per-user, wholesale-replaced served recommendation list `GET /recommendations/{userId}` reads; identified by `userId` | Aggregate root |
+| RecommendedItem | One `{sku, score, source}` entry within a `RecommendationSet` | Value object |
+| ProductViewed | Domain event (new, formalized here — publisher is the Client Event Ingestion Gateway, infrastructure, not a bounded context): a product detail view | Domain event |
+| ProductClicked | Domain event (new, formalized here, same publisher as above): a click-through on a product | Domain event |
+| SearchPerformed | Domain event (new, formalized here, same publisher as above): a search query and its result SKUs | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-recommendation-service` uses it |
+|---|---|---|
+| Sku / Product / Variant | kart-product-service | `ProductAffinity`/`TrendingPool`/`RecommendationSet` reference SKUs opaquely; live discontinued-status filtering (`GET /products/{id}`) never models Product's own catalog aggregate |
+| UserId | kart-identity-service | Every `userId` field is a reference only; never models authentication or session state |
+| Order / OrderDelivered | kart-order-service | Consumed only as the purchase-signal trigger; never models Order's own Saga/state machine |
+| WarehouseStock | kart-inventory-service | Consulted only for live stock-level filtering at read time; never models Inventory's own reservation aggregate |
+
+## Owned by `kart-admin-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| AdminPermissionGrant | The category-scoped, default-deny fine-grained permission record for one `(principalId, category)` pair — issued, and only ever revoked (never deleted), by a principal already holding a live `permission-management` grant; identified by `grantId` | Aggregate root |
+| PermissionCategory | The closed five-value set a grant or action is scoped to: `catalog-management \| coupon-issuance \| user-suspension \| inventory-replenishment \| permission-management` (ADR-0010; `requirement-spec.md` §6 Decision item 1) | Value object |
+| AdminAction | The append-only, transactionally-atomic record of one completed back-office action, doubling as the Outbox row for `AdminActionPerformed`; identified by `actionId` | Aggregate root |
+| AdminActionPerformed | Domain event (BRD §5.4; full catalog row added by ADR-0007): published once an `AdminAction` row's local commit lands, consumed by Analytics as its sole audit-trail source | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-admin-service` uses it |
+|---|---|---|
+| Admin (coarse role claim) | kart-identity-service | `AdminPermissionGrant`/`AdminAction` reference `principalId`/`adminId` as an opaque Identity-issued id only; Admin never models Identity's own role/session/JWT-issuance state |
+| Product / Category / Coupon / user account / WarehouseStock | kart-product-service / kart-category-service / kart-offer-service / kart-identity-service / kart-inventory-service | `AdminAction.entityId` references each by opaque id only; every mutation is a synchronous proxy call to that owning service's own write API (ADR-0010 Decision 2), never a locally-modeled copy |

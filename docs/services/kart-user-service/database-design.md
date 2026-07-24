@@ -28,8 +28,10 @@ CREATE TABLE user_profiles (
     app_installed         BOOLEAN NOT NULL DEFAULT false,
     erasure_status        TEXT NOT NULL CHECK (erasure_status IN ('Active', 'Erased')) DEFAULT 'Active',
     erased_at             TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; stamped only by the UserRegistered consumer, never a client write
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped on every profile/preference/erasure write
+    created_by            TEXT NOT NULL,                       -- BRD §24.3 — the acting principal; 'system:identity-registration-consumer' for the UserRegistered-triggered insert (this row is never client-created directly)
+    updated_by            TEXT NOT NULL                        -- BRD §24.3 — the owning userId for a self-service write, 'system:identity-account-sync-consumer' for a UserAccountUpdated-triggered contactCopy reconciliation, or Admin Service's client-credentials principal for the erasure-tombstone write (ADR-0017)
 );
 
 -- ── addresses ───────────────────────────────────────────────────────────
@@ -49,8 +51,10 @@ CREATE TABLE addresses (
     country_code  TEXT NOT NULL,
     phone         TEXT,
     is_default    BOOLEAN NOT NULL DEFAULT false,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped on every whole-record-replace write touching this address
+    created_by    TEXT NOT NULL,                        -- BRD §24.3 — the owning userId for every client-facing address write (this table has no system-only insert path)
+    updated_by    TEXT NOT NULL                         -- BRD §24.3 — the owning userId, or Admin Service's client-credentials principal for the erasure-tombstone write (ADR-0017)
 );
 
 -- Enforces "at most one default Address per (user_id, type)" (ddd-model.md
@@ -75,8 +79,11 @@ CREATE TABLE user_outbox_events (
     event_type   TEXT NOT NULL,       -- UserProfileUpdated | UserNotificationPreferenceUpdated | UserDataErased
     user_id      TEXT NOT NULL,
     payload      JSONB NOT NULL,
-    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now(),  -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
+    published_at TIMESTAMPTZ,
+    created_by   TEXT NOT NULL,                        -- BRD §24.3 — the principal whose write to user_profiles/addresses produced this outbox row (the acting userId, or a system:* principal for a consumer-triggered write, mirroring created_by on the row that triggered it)
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped when published_at is set
+    updated_by   TEXT NOT NULL DEFAULT 'system:user-outbox-poller' -- BRD §24.3 — the Outbox poller is the only process that ever updates a row after insert
 );
 
 CREATE INDEX idx_user_outbox_unpublished ON user_outbox_events (id) WHERE published_at IS NULL;
@@ -85,6 +92,50 @@ CREATE INDEX idx_user_outbox_unpublished ON user_outbox_events (id) WHERE publis
 ### Why the default-address invariant is a database constraint, not just an application check
 
 `ddd-model.md`'s invariant ("at most one default `Address` per type") is enforced by the load-mutate-save-whole-aggregate pattern at the application layer (edge-cases.md's last-write-wins concurrency decision already commits to whole-record replace, so the application already loads every address before writing any one of them) — the partial unique index above is a database-layer backstop against that application logic having a bug, not the primary enforcement mechanism. This mirrors the same "invariant enforced in the aggregate, API/DB-layer checks are a backstop, never the only line of defense" principle `api-standards.md` already states generally.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security — never a shared, central component. User Service's write model is entirely PostgreSQL (`user_profiles`, `addresses`), and both tables have a genuine per-row end-user ownership concept, so native RLS is the mechanism for each.
+
+**Session-scoped principal setting.** Same ambient mechanism already established platform-wide (see `kart-identity-service/database-design.md`'s precedent): immediately after acquiring a pooled connection and before any query runs, this service issues `SET LOCAL app.current_principal = <id>` and `SET LOCAL app.current_principal_kind = <'user'|'service'|'system'>`, resolved server-side from the validated JWT / client-credentials / event-consumer context — never a client-suppliable value. `app.current_principal` is the caller's own `user_id` for self-service profile/address requests, Admin Service's client-credentials `client_id` for the erasure-tombstone write (ADR-0017), or a well-known `system:*` id for the `UserRegistered`/`UserAccountUpdated` event consumers and the Outbox poller. This is the same resolved-principal value the shared `kart-shared` `created_by`/`updated_by` interceptor (§24.3, above) stamps onto every mutation — RLS and audit-column injection read one ambient current-principal accessor from that same package, not two independently-maintained notions of "who is acting."
+
+**Policy shape.** Both tables' policies grant access when the row's `user_id` matches `app.current_principal`, **or** when `app.current_principal_kind` is `service`/`system`. The latter branch is not a blanket bypass: per requirement-spec.md's §24.1.2 cross-reference, the erasure-tombstone write is already restricted to Admin Service's own client-credentials principal at the API layer, and the `UserRegistered`/`UserAccountUpdated` consumers and the Outbox poller are internal processes no external caller can reach at all — RLS's marginal, additive protection here is specifically against the failure mode §24.1.4 itself names (a user-facing code path that forgets its own `WHERE user_id = ...` clause), which stays fully blocked whenever `app.current_principal_kind = 'user'`.
+
+```sql
+-- user_profiles: the row's own primary key is the ownership column
+ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_profiles_owner_or_system ON user_profiles
+    USING (
+        user_id = current_setting('app.current_principal')
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- addresses: child entity of UserProfile, same user_id ownership column as its parent
+ALTER TABLE addresses ENABLE ROW LEVEL SECURITY;
+CREATE POLICY addresses_owner_or_system ON addresses
+    USING (
+        user_id = current_setting('app.current_principal')
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+**Not covered by this policy (no per-row end-user ownership concept):**
+
+- `user_outbox_events` — an internal relay table read exclusively by this service's own Outbox poller process, never by any end-user- or admin-facing request path directly; its `user_id` column records event-payload provenance for audit, not an access-control predicate the poller itself needs gated against, the same carve-out `kart-identity-service/database-design.md` already documents for its own `outbox_events` table.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. This service is the exact worked example BRD §24.1.5 itself names, so the classification below grounds directly in that table rather than deriving one from scratch.
+
+| Column | Full Value Visible To | Masked/Omitted For | Masking Rule |
+|---|---|---|---|
+| `addresses.line1`, `addresses.line2` | Owning Customer, Admin | Support Agent | Support Agent sees `city`/`region`/`postal_code` only — enough to verify a shipping/billing location without exposing the exact street address |
+| `addresses.phone` | Owning Customer, Admin | Support Agent | Support Agent sees only the last 4 digits (e.g. rendered as `•••• 4821`) — enough to verify caller identity against the account without exposing the full number |
+| `user_profiles.email_copy`, `user_profiles.display_name_copy` | Owning Customer, Admin, Support Agent | — | Not masked — these are the denormalized copies of Identity-owned contact fields (ADR-0006) already needed for support-ticket lookups/correspondence; masking them here would block Support Agent's legitimate need to identify and correspond with the customer, the same "already necessary for a caller who can already see the row" carve-out BRD §24.1.5 itself allows for operationally-required columns |
+
+**Why this list and no more:** `locale`/`currency`/`notification_opt_in`/`marketing_consent`/`app_installed`/`erasure_status` and the §24.3 audit columns carry no PII and are not classified as sensitive — every principal who legitimately reaches the row at all (owner, Admin, Support Agent, per the RLS policy above) needs to see them to do their job (e.g. a Support Agent needs the opt-in state to explain why a notification was or wasn't sent). This mirrors BRD §24.1.5's own reasoning for Identity's non-credential columns.
+
+**Enforcement point:** primarily this service's own response-serialization DTO (api-contract.yaml) shaping the `addresses.line1`/`line2`/`phone` fields per the caller's coarse role, per §24.1.5's stated primary control; secondarily, for any direct database connection bypassing this service's own API entirely (an analytics/BI read-replica, ops tooling), native `GRANT SELECT (col1, col2, ...) ON addresses TO <db_role>` restricted to exclude `line1`/`line2`/`phone` for any database role other than this service's own application service role — no such secondary direct-access role exists today per this document, so this is the defense-in-depth control to apply if/when one is added.
 
 ## MongoDB (Read Side) — `user_read_model`
 

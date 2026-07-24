@@ -1,7 +1,7 @@
 ---
 doc_type: event-contract
 service: kart-analytics-service
-status: pending-approval
+status: approved
 generated_by: event-design-agent
 source: docs/services/kart-analytics-service/requirement-spec.md, docs/services/kart-analytics-service/edge-cases.md, docs/services/kart-analytics-service/design-decisions.md, docs/services/kart-analytics-service/architecture.md, docs/services/kart-analytics-service/database-design.md, docs/adr/0004-analytics-full-fanin-ingestion.md, docs/adr/0007-event-catalog-completeness.md, docs/adr/0008-event-catalog-completeness-round-2.md, docs/adr/0012-payment-chargeback-handling.md, docs/adr/0015-shipping-shipment-creation-failed-event.md, docs/adr/0016-user-gdpr-erasure-policy.md, docs/services/kart-offer-service/event-contract.md, docs/services/kart-admin-service/event-contract.md, docs/services/kart-cart-service/event-contract.md, docs/services/kart-category-service/event-contract.md, docs/services/kart-identity-service/event-contract.md, docs/services/kart-delivery-tracking-service/event-contract.md, docs/requirements/kart-requirements.md
 ---
@@ -10,9 +10,9 @@ source: docs/services/kart-analytics-service/requirement-spec.md, docs/services/
 
 ## Pipeline Note (read before reviewing the tables below)
 
-No `docs/services/kart-analytics-service/ddd-model.md` exists for this service — `database-design.md`'s own header note already records why, citing the same precedent already used by `kart-admin-service/database-design.md`: `architecture.md`'s Boundary Rationale fixes Analytics as a **Generic Subdomain** with exactly two responsibilities (an idempotent full-fan-in ingestion pipeline, and a set of read models derived from it) and no transactional aggregate root of its own beyond "the raw ingested event" — narrow enough to design directly from `requirement-spec.md`/`edge-cases.md`/`design-decisions.md`/`architecture.md`/`database-design.md` without a dedicated DDD-Agent pass.
+**Superseded note (corrected on this pass):** this section previously read "No `ddd-model.md` exists for this service," citing the same precedent recorded in `kart-admin-service/database-design.md`. `docs/services/kart-analytics-service/ddd-model.md` has since been authored (its own "Pipeline-order note" explicitly flags that this prose was stale) — corrected in place, the same way `database-design.md` already corrected its own identical stale note. `ddd-model.md` formalizes Analytics' shape as four aggregate roots (`IngestedEvent`, `DeadLetteredEvent`, `ReconciliationRun`, `PiiRedactionRecord`), fully consistent with the event catalog below — no rework was needed to reconcile the two documents.
 
-`design-decisions.md`, `architecture.md`, and `database-design.md` still carry an unchecked sign-off checkbox (frontmatter `status: pending-approval`), but all three are internally consistent with the now fully-closed (`status: approved`) `requirement-spec.md`/`edge-cases.md` and raise no open question this stage needs to re-litigate. This contract is derived directly from their already-decided content — full fan-in (ADR-0004), the D2 schema-registry/versioning scheme, the D5 retry/DLQ tier for Analytics' own write failures, and the concrete `analytics_dlq_events`/`analytics_raw_events` schema already built in `database-design.md` — rather than re-deciding anything. This file's own `status` is left at `pending-approval`, consistent with the `pending-approval` state already carried by those three docs, pending a human sign-off pass across all of them together.
+`design-decisions.md`, `architecture.md`, `ddd-model.md`, and `database-design.md` are all now `status: approved`, internally consistent with the already-closed (`status: approved`) `requirement-spec.md`/`edge-cases.md`, with no open question left to re-litigate. This contract is derived directly from their already-decided content — full fan-in (ADR-0004), the D2 schema-registry/versioning scheme, the D5 retry/DLQ tier for Analytics' own write failures, and the concrete `analytics_dlq_events`/`analytics_raw_events` schema already built in `database-design.md` — rather than re-deciding anything.
 
 Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer-only** (`design-decisions.md`, "Ingestion Transport & Communication Style" — Analytics was the first service migrated off RabbitMQ per BRD §15). Every event below is still *published* by its originating service primarily onto the platform's RabbitMQ topic exchange (`ecommerce.events`, per [kart-conventions.md](../../standards/kart-conventions.md)) during the strangler migration window, dual-published onto Kafka (`kart.analytics.<entity>` topics, per `kart-conventions.md`'s own naming example) for Analytics to consume (`event-standards.md`'s Kafka section: "dual-publish from the Outbox during transition"). The per-event **Retry / Delivery-to-Analytics DLQ** column below names each event's own broker-level tier as documented in `kart-requirements.md` §10 (as extended by ADR-0007/0008/0012/0015) or, where more authoritative, that event's own publishing service's already-authored `event-contract.md` — it is **each publisher's own contract to own and finalize**, not this document's; this document does not re-decide any of it. What genuinely *is* this document's own job — because no publisher's contract covers it — is Analytics' own **post-ingestion** write-failure handling (D5), covered in its own section below.
 
@@ -28,13 +28,15 @@ Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer
 
 ### Order
 
+**Correction against this document's earlier draft, applied the same way `kart-review-service/event-contract.md` already flagged for its own consumers:** all five Order lifecycle events below were previously listed at BRD §10's original 3x/shared-`order.dlq` tier. `kart-order-service/event-contract.md` (built after this table was last drafted) has since elevated all five to **5x exponential, paged on-call**, with a per-event DLQ (requirement-spec resolution #7 — "a stuck `OrderCreated`/`OrderConfirmed`/etc. blocks a downstream Saga step or correctness gate indefinitely, at least as severe as a stuck `PaymentCompleted`"). This table now cites that later, authoritative source rather than the superseded BRD figure.
+
 | Event | Payload (key fields) | Retry / Delivery-to-Analytics DLQ | Source of truth |
 |---|---|---|---|
-| `OrderCreated` | `orderId, userId, items, total` | 3x exponential, `order.dlq` | BRD §10 |
-| `OrderConfirmed` | `orderId, address` | 3x, `order.dlq` | BRD §10 |
-| `OrderCancelled` | `orderId, reason` | 3x, `order.dlq` | BRD §10 |
-| `OrderCompensationTriggered` | `orderId, reason` | 3x, `order.dlq` | ADR-0007 |
-| `OrderDelivered` | `orderId, deliveredAt` | 3x, `order.dlq` | BRD §10 (event introduced by ADR-0005) |
+| `OrderCreated` | `orderId, userId, items, total` | 5x exponential, paged on-call, `order.order-created.dlq` | `kart-order-service/event-contract.md` (approved) |
+| `OrderConfirmed` | `orderId, address` | 5x exponential, paged on-call, `order.order-confirmed.dlq` | `kart-order-service/event-contract.md` (approved) |
+| `OrderCancelled` | `orderId, reason` | 5x exponential, paged on-call, `order.order-cancelled.dlq` | `kart-order-service/event-contract.md` (approved) |
+| `OrderCompensationTriggered` | `orderId, reason` | 5x exponential, paged on-call, `order.order-compensation-triggered.dlq` | `kart-order-service/event-contract.md` (approved) — supersedes ADR-0007's original 3x/shared-`order.dlq` assignment |
+| `OrderDelivered` | `orderId, deliveredAt` | 5x exponential, paged on-call, `order.order-delivered.dlq` | `kart-order-service/event-contract.md` (approved; event introduced by ADR-0005) |
 
 ### Inventory
 
@@ -52,15 +54,15 @@ Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer
 | `PaymentCompleted` | `orderId, txnId` | 5x (money-critical), `payment.dlq`, paged on-call | BRD §10 |
 | `PaymentFailed` | `orderId, reason` | 5x, `payment.dlq`, paged on-call | BRD §10 |
 | `RefundIssued` | `orderId, refundId, amount` | 5x, `payment.dlq`, paged on-call | ADR-0007 |
-| `ChargebackReceived` | `orderId, paymentIntentId, chargebackId, amount, reason` | 5x, `payment.dlq`, paged on-call | [ADR-0012](../../adr/0012-payment-chargeback-handling.md) — **status: proposed**, not yet `accepted`; cited as the current best record, not a settled fact |
+| `ChargebackReceived` | `orderId, paymentIntentId, chargebackId, amount, reason` | 5x, paged on-call, `payment.chargeback-received.dlq` | [ADR-0012](../../adr/0012-payment-chargeback-handling.md) — **status: accepted** (finalized during `kart-payment-service`'s own pipeline completion pass, which also finalized this event's concrete per-event DLQ name as `payment.chargeback-received.dlq` per that service's `event-contract.md`, superseding this table's earlier simplified BRD-style shared `payment.dlq` label) |
 
 ### Shipping / Delivery Tracking
 
 | Event | Payload (key fields) | Retry / Delivery-to-Analytics DLQ | Source of truth |
 |---|---|---|---|
 | `ShipmentDispatched` | `orderId, carrier, trackingId` | 3x, `shipping.dlq` | BRD §10 |
-| `ShipmentCreationFailed` | `orderId, reason` | 3x, `shipping.dlq` | [ADR-0015](../../adr/0015-shipping-shipment-creation-failed-event.md) — **status: proposed** |
-| `DeliveryStatusUpdated` | `trackingId, status` | 3x, `tracking.dlq` | BRD §10, re-confirmed unchanged by [`kart-delivery-tracking-service/event-contract.md`](../kart-delivery-tracking-service/event-contract.md) (pending-approval) — that service deliberately declined to expand this payload beyond `{trackingId, status}` (its own "Payload Resolution" section), so no change is needed here |
+| `ShipmentCreationFailed` | `orderId, reason` | 3x, `shipping.dlq` | [ADR-0015](../../adr/0015-shipping-shipment-creation-failed-event.md) — **status: accepted** |
+| `DeliveryStatusUpdated` | `trackingId, status` | 3x, `tracking.dlq` | BRD §10, re-confirmed unchanged by [`kart-delivery-tracking-service/event-contract.md`](../kart-delivery-tracking-service/event-contract.md) (approved) — that service deliberately declined to expand this payload beyond `{trackingId, status}` (its own "Payload Resolution" section), so no change is needed here |
 
 ### Product / Review / Category
 
@@ -69,9 +71,9 @@ Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer
 | `ProductCreated` | `sku, name, description, categoryId, brand, price, status, attributes` (grown from the original `sku, attributes` by [ADR-0018](../../adr/0018-search-catalog-signal-sourcing.md) once `kart-search-service` confirmed a need for the full snapshot; additive, Analytics' own consumption unaffected) | 3x, `catalog.dlq` (Analytics' own delivery queue; `kart-product-service/event-contract.md` now names this `analytics.product-created.dlq` per-consumer-group, not the shared label) | BRD §10; [ADR-0018](../../adr/0018-search-catalog-signal-sourcing.md) |
 | `ProductPriceChanged` | `sku, oldPrice, newPrice` | 3x, `catalog.dlq` | BRD §10 (publisher corrected Pricing→Product by ADR-0008) |
 | `ProductUpdated` | `sku, changedFields, occurredAt, name, description, categoryId, brand, status, attributes` (grown by [ADR-0018](../../adr/0018-search-catalog-signal-sourcing.md) alongside `ProductCreated`, for `kart-search-service`'s benefit; Analytics continues to read only `changedFields`/`occurredAt`) | Now specified: 3x, `analytics.product-updated.dlq` | `kart-product-service/event-contract.md`; [ADR-0018](../../adr/0018-search-catalog-signal-sourcing.md) |
-| `ReviewSubmitted` | `orderId, sku, rating` | 2x, `review.dlq` | BRD §10 |
-| `ReviewUpdated` | Not yet specified | **Provisional**: 2x, `review.dlq` (same tier as sibling `ReviewSubmitted`) — `kart-review-service/architecture.md`'s own placeholder, explicitly "not a final answer," pending that service's own Event Design Agent confirmation | 
-| `CategoryUpdated` | `categoryId, name, parentId, path, operation, occurredAt` | 3x, `category.category-updated.dlq` | [`kart-category-service/event-contract.md`](../kart-category-service/event-contract.md) (pending-approval) — supersedes ADR-0008's coarser `categoryId, name` payload (Category's own "Payload Resolution" section grows it to describe subtree moves per its already-locked edge-case decision) and splits the shared `catalog.dlq` label into its own per-event queue |
+| `ReviewSubmitted` | `orderId, sku, rating, reviewId, userId` (grown from BRD §10's original `orderId, sku, rating`; matches `kart-review-service/event-contract.md`'s own approved schema — Analytics' prior subset was a strict subset of the real payload, no wire-format conflict, just an unread superset of fields now added for completeness) | 2x, `review.review-submitted.dlq` | `kart-review-service/event-contract.md` (approved) — supersedes BRD §10's simplified shared `review.dlq` label |
+| `ReviewUpdated` | `orderId, sku, oldRating, newRating` | **Confirmed** (no longer provisional): 2x, no paging, `review.review-updated.dlq` | `kart-review-service/event-contract.md` (approved) — that service's own event-contract.md explicitly flagged this row's earlier "Not yet specified"/provisional state as stale in Analytics' table and confirmed no actual incompatibility; this row now reflects the finalized tier and schema directly |
+| `CategoryUpdated` | `categoryId, name, parentId, path, operation, occurredAt` | 3x, `category.category-updated.dlq` | [`kart-category-service/event-contract.md`](../kart-category-service/event-contract.md) (approved) — supersedes ADR-0008's coarser `categoryId, name` payload (Category's own "Payload Resolution" section grows it to describe subtree moves per its already-locked edge-case decision) and splits the shared `catalog.dlq` label into its own per-event queue |
 
 ### Offer
 
@@ -87,17 +89,17 @@ Exchange/transport note: Analytics' own ingestion transport is **Kafka, consumer
 | Event | Payload (key fields) | Retry / Delivery-to-Analytics DLQ | Source of truth |
 |---|---|---|---|
 | `UserProfileUpdated` | `userId, changedFields` | 2x, `user.dlq` | ADR-0008 |
-| `UserDataErased` | `userId, erasedAt` | 5x (compliance-critical), paged on-call; **DLQ name not yet finalized** | [ADR-0016](../../adr/0016-user-gdpr-erasure-policy.md) item 7 — **status: proposed**. Tier is settled (same high-retry-budget/paged tier as `Payment*`, deliberately not the looser catalog tier); the concrete DLQ queue/table name is `kart-user-service`'s own Event Design Agent call to make, not decided here |
-| `UserRegistered` | `userId, email` | 3x, `identity.user-registered.dlq` | [`kart-identity-service/event-contract.md`](../kart-identity-service/event-contract.md) (pending-approval) — supersedes ADR-0007's shared `identity.dlq` label with a per-event queue; payload unchanged |
-| `SessionCreated` | `userId, sessionId` | 2x, `identity.session-created.dlq` | `kart-identity-service/event-contract.md` (pending-approval) — supersedes ADR-0007's shared `identity.dlq` label with a per-event queue; payload unchanged |
-| `UserAccountUpdated` | `userId, email, displayName, updatedAt` | 2x, `identity.user-account-updated.dlq` | `kart-identity-service/event-contract.md` (pending-approval) — supersedes ADR-0006/ADR-0008: adds the `updatedAt` field (Identity's own "Schema Finalization" decision, enabling last-write-wins ordering) and splits the shared `identity.dlq` label into its own per-event queue |
+| `UserDataErased` | `userId, erasedAt` | 5x exponential backoff, paged on final DLQ landing (compliance-critical tier), `analytics.user-data-erased.dlq` | [ADR-0016](../../adr/0016-user-gdpr-erasure-policy.md) item 7 — **status: accepted**. `kart-user-service/event-contract.md` (approved) has since finalized the per-consumer DLQ name — Analytics gets its own dedicated `analytics.user-data-erased.dlq`, never a shared queue with the other six consumers of this event (`event-standards.md`'s "never shared" rule) |
+| `UserRegistered` | `userId, email` | 3x, `identity.user-registered.dlq` | [`kart-identity-service/event-contract.md`](../kart-identity-service/event-contract.md) (approved) — supersedes ADR-0007's shared `identity.dlq` label with a per-event queue; payload unchanged |
+| `SessionCreated` | `userId, sessionId` | 2x, `identity.session-created.dlq` | `kart-identity-service/event-contract.md` (approved) — supersedes ADR-0007's shared `identity.dlq` label with a per-event queue; payload unchanged |
+| `UserAccountUpdated` | `userId, email, displayName, updatedAt` | 2x, `identity.user-account-updated.dlq` | `kart-identity-service/event-contract.md` (approved) — supersedes ADR-0006/ADR-0008: adds the `updatedAt` field (Identity's own "Schema Finalization" decision, enabling last-write-wins ordering) and splits the shared `identity.dlq` label into its own per-event queue |
 
 ### Notification / Cart / Wishlist / Admin
 
 | Event | Payload (key fields) | Retry / Delivery-to-Analytics DLQ | Source of truth |
 |---|---|---|---|
 | `NotificationSent` | `userId, channel, status` | 1x (fire-and-forget audit), `notification.dlq` | BRD §10 |
-| `CartCheckedOut` | `cartId, userId, items` | 2x, `cart.dlq` | [`kart-cart-service/event-contract.md`](../kart-cart-service/event-contract.md) (pending-approval) — confirms, does not change, BRD §10/ADR-0007's value |
+| `CartCheckedOut` | `cartId, userId, items` | 2x, `cart.dlq` | [`kart-cart-service/event-contract.md`](../kart-cart-service/event-contract.md) (approved) — confirms, does not change, BRD §10/ADR-0007's value |
 | `WishlistPriceAlertTriggered` | `userId, sku, oldPrice, newPrice` | 2x, `wishlist.dlq` | ADR-0007 |
 | `AdminActionPerformed` | `adminId, action, entityId` | 1x (fire-and-forget audit), `admin.admin-action-performed.dlq` | [`kart-admin-service/event-contract.md`](../kart-admin-service/event-contract.md) (pending-approval) — supersedes ADR-0007's simplified shared `admin.dlq` label, per that service's own "never shared" correction |
 
@@ -139,5 +141,5 @@ The requirement-spec's former Open Question 2 (schema versioning/evolution polic
 
 ## Sign-off
 
-- [ ] Reviewed by a human (alongside `design-decisions.md`, `architecture.md`, and `database-design.md`'s own still-pending sign-off)
-- [ ] Approved
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved

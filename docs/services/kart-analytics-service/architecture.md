@@ -1,7 +1,7 @@
 ---
 doc_type: architecture
 service: kart-analytics-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
 source: [docs/services/kart-analytics-service/requirement-spec.md, docs/services/kart-analytics-service/edge-cases.md, docs/services/kart-analytics-service/design-decisions.md]
 ---
@@ -26,7 +26,7 @@ Analytics consumes the **full fan-in of every published platform event** (resolv
 | Inbound (consumed) | Shipping | `ShipmentDispatched`, `ShipmentCreationFailed` | Async | `ShipmentCreationFailed` is new per [ADR-0015](../../adr/0015-shipping-shipment-creation-failed-event.md) — confirmed as an Analytics-consumed event on `kart-shipping-service/architecture.md`'s own Dependencies table, added here this pass |
 | Inbound (consumed) | Delivery Tracking | `DeliveryStatusUpdated` | Async | |
 | Inbound (consumed) | Product | `ProductCreated`, `ProductPriceChanged`, `ProductUpdated` | Async | Publisher corrected from "Pricing" to "Product" by ADR-0008; consistent with `kart-offer-service/architecture.md`'s own reading. `ProductUpdated` is a single-service default (not yet in BRD §10 per ADR-0008's deliberate non-resolution) that `kart-product-service/architecture.md` already names Analytics as the sole confirmed consumer of via ADR-0004's default — added here this pass |
-| Inbound (consumed) | Review | `ReviewSubmitted`, `ReviewUpdated` | Async | `ReviewUpdated` is new (`kart-review-service/requirement-spec.md` §6 Q3) — `kart-review-service/architecture.md` confirms Product and Analytics as its consumers; retry/DLQ tier not yet registered (carried to the Event Design Agent stage on Review's own side), added here this pass |
+| Inbound (consumed) | Review | `ReviewSubmitted`, `ReviewUpdated` | Async | `ReviewUpdated` is new (`kart-review-service/requirement-spec.md` §6 Q3) — `kart-review-service/architecture.md` confirms Product and Analytics as its consumers; retry/DLQ tier since confirmed at 2x/no-paging, `review.review-updated.dlq`, by that service's own approved `event-contract.md` (see this service's own `event-contract.md` for the full citation) |
 | Inbound (consumed) | Category | `CategoryUpdated` | Async | Added to the catalog by ADR-0008, Analytics-only consumer |
 | Inbound (consumed) | Offer | `CouponRedeemed`, `PriceQuoteIssued`, `PromotionActivated`, `PromotionDeactivated` | Async | Confirmed Analytics-only consumer for the latter three, per `kart-offer-service/architecture.md`'s own Dependencies table (ADR-0008/ADR-0004); `PromotionDeactivated` added here this pass — same resolution as `PromotionActivated`, Analytics-only, not a new decision |
 | Inbound (consumed) | User | `UserProfileUpdated`, `UserDataErased` | Async | `UserProfileUpdated` added to the catalog by ADR-0008, Analytics-only consumer. `UserDataErased` is new per [ADR-0016](../../adr/0016-user-gdpr-erasure-policy.md) item 6, which states explicitly: "Analytics consumes `UserDataErased` under its standing full fan-in default (ADR-0004) — additive, not a special case"; added here this pass. Per ADR-0016 item 7, retry/DLQ (on the publish side, into Analytics) is the platform's compliance-critical tier (high retry budget + human paging on final DLQ landing), not the looser catalog tier most Analytics-only events use — see the Non-Functional/Resilience carry-forward note below for what this means for Analytics' own ingestion handling |
@@ -59,7 +59,7 @@ The requirement-spec explicitly left latency numbers undefined (no public reques
 - **Ingestion lag** (event published on Kafka → durably landed in the raw warehouse layer): **P95 < 60s, P99 < 5 min.** Consistent with the micro-batched-write, autoscaled-consumer-group design already decided (design-decisions.md, Concurrency/Scaling decision). This is an internal freshness target, not a customer-facing SLA.
 - **Dashboard/funnel query latency** (internal REST layer, D4a's pre-aggregated tables only): **P95 < 2s, P99 < 5s.** Ad-hoc BI-tool queries against the raw/aggregate warehouse schema are explicitly excluded from this budget — they are exploratory, best-effort, not an operational target.
 - **Reconciliation finalization:** the nightly batch reconciliation (edge-cases.md, "Out-of-Order Event Arrival" decision) completes by **06:00 UTC** daily; a day's dashboard/funnel figures carry a "provisional" flag until that run completes, then flip to final. This surfaces the eventual-consistency window explicitly (per `ddd-cqrs-standards.md`'s "surface, don't hide" rule) rather than presenting a fake-precise number in the interim.
-- These are this stage's proposed numbers only — not BRD-sourced, not yet load-tested. They require explicit human sign-off before being treated as load-bearing, the same non-blocking carry-forward pattern the requirement-spec itself used for `kart-search-service`'s and `kart-recommendation-service`'s own unresolved SLAs.
+- These are this stage's proposed numbers only — not BRD-sourced, not yet load-tested — confirmed by this document's own sign-off below, the same non-blocking carry-forward pattern the requirement-spec itself used for `kart-search-service`'s own consistency-lag SLA (`kart-recommendation-service`'s own staleness bound has since been resolved to a concrete 5-minute/15-minute figure in that service's own approved `architecture.md`, not left unresolved the way it was when this note was first drafted).
 - **`UserDataErased`'s upstream compliance-critical retry tier does not change Analytics' own D5 write-failure handling.** ADR-0016 item 7 sets User's *publish*-side retry/DLQ for `UserDataErased` to the platform's high-retry-budget/paged tier (re-delivery *to* Analytics), the same relationship the Payment row above already has with D5. Requirement-spec's Reliability NFR is explicit that Analytics' own at-least-once/idempotent handling "applies uniformly across every consumed event" — so `UserDataErased` still gets the same 3x-then-`analytics.dlq` Analytics-side handling (D5) as any other event; it is not promoted to its own bespoke retry tier just because the upstream publish side is compliance-critical. What *is* different for this one event (redact-vs-tag the warehouse copy) is a retention-policy question, not a retry-tier one — carried forward above.
 
 ## Distributed-Monolith Risk
@@ -70,5 +70,5 @@ The requirement-spec explicitly left latency numbers undefined (no public reques
 
 ## Sign-off
 
-- [ ] Reviewed by:
-- [ ] Approved to proceed to DDD Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to DDD Agent

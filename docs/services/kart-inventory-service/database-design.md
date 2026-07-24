@@ -34,7 +34,10 @@ CREATE TABLE warehouse_stock (
     target_stocking_level   INTEGER NOT NULL,
                                     -- the 100% baseline replenishment_threshold
                                     -- is computed against
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by              TEXT NOT NULL,   -- BRD §24.3: the principal that first provisioned this warehouse/SKU stock row (Admin operator or an initial-load process)
+    updated_by              TEXT NOT NULL,   -- BRD §24.3: the principal behind the most recent debit/credit -- Order Service's client identity (reserve/release) or Admin/system:inventory-replenishment-trigger (replenishment)
 
     PRIMARY KEY (warehouse_id, sku)
 );
@@ -68,10 +71,13 @@ CREATE TABLE reservations (
                              -- actually caused the release -- all four still resolve
                              -- to the identical idempotent write path
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped on every status transition (reserved -> released/expired)
     expires_at       TIMESTAMPTZ NOT NULL,
                              -- created_at + 15 minutes (requirement-spec.md Decision 2)
                              -- -- the periodic sweep's own query target, see below
-    released_at      TIMESTAMPTZ NULL
+    released_at      TIMESTAMPTZ NULL,
+    created_by       TEXT NOT NULL,          -- BRD §24.3: Order Service's client identity that created this reservation
+    updated_by       TEXT NOT NULL           -- BRD §24.3: the principal behind the most recent status transition -- Order Service's client identity (explicit release), or a well-known system:* id for the TTL sweep / OrderCancelled / OrderCompensationTriggered consumers
 );
 
 -- Order Cancelled / OrderCompensationTriggered consumers look up "the live
@@ -96,6 +102,10 @@ CREATE TABLE reservation_allocations (
     reservation_id   UUID NOT NULL REFERENCES reservations (reservation_id),
     warehouse_id     TEXT NOT NULL,
     qty              INTEGER NOT NULL CHECK (qty > 0),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(), -- BRD §24.3 uniformity -- no update path exists (an allocation is created once, atomically with its parent Reservation, never edited)
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(), -- carried for platform-wide §24.3 uniformity, mirrors created_at until an update path exists
+    created_by       TEXT NOT NULL,      -- BRD §24.3: Order Service's client identity -- same acting principal as the parent Reservation's own created_by
+    updated_by       TEXT NOT NULL,      -- BRD §24.3: mirrors created_by until an update path exists
 
     PRIMARY KEY (reservation_id, warehouse_id)
 );
@@ -119,8 +129,10 @@ CREATE TABLE inventory_outbox_events (
                    )),
     aggregate_ref  TEXT NOT NULL,      -- reservation_id for the first three; (warehouse_id, sku) for InventoryReplenished
     payload        JSONB NOT NULL,
-    occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at   TIMESTAMPTZ NULL    -- set only by the Outbox relay after a successful publish to ecommerce.events
+    occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
+    published_at   TIMESTAMPTZ NULL,   -- set only by the Outbox relay after a successful publish to ecommerce.events
+    created_by     TEXT NOT NULL,      -- BRD §24.3: the principal whose domain mutation produced this outbox row (Order Service's client identity, a system:* id, or Admin's operator identity, matching the source write)
+    updated_by     TEXT NOT NULL DEFAULT 'system:inventory-outbox-relay' -- BRD §24.3: the Outbox relay is the only process that ever updates a row after insert (setting published_at)
 );
 
 -- Standard Outbox poller scan (BRD §11) -- an index range-scan, not a
@@ -134,6 +146,19 @@ CREATE INDEX idx_inventory_outbox_unpublished ON inventory_outbox_events (occurr
 Not a rebuildable CQRS projection — a **short-TTL cache-aside** in front of PostgreSQL (`design-decisions.md`), used only by the informational read paths (`GET /inventory/{sku}` and the internal `InventoryAvailabilityService.CheckAvailability` gRPC RPC, `api-contract.yaml`). The write path (reserve/release/replenish) never reads through this cache — every write takes a fresh `SELECT ... FOR UPDATE` inside its own transaction, so the oversell invariant is never exposed to cached staleness.
 
 - `inventory:stock:{sku}` (or `inventory:stock:{sku}:{warehouseId}` when warehouse-scoped) → `{availableQty}`, short TTL (a few seconds), invalidated by natural expiry only, not synchronously on write (design-decisions.md rejects write-through here as unnecessary complexity on the hottest write path).
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. None of Inventory's four tables carry a `user_id`-shaped ownership column, so native RLS's ownership predicate has nothing to key on here:
+
+- **`reservations`** keys on `order_id`, not `user_id` — structurally identical to the BRD's own §24.1.4 worked example for Payment's `payment_intents` ("never stores `user_id` directly... a `user_id`-shaped row-level policy would not even apply"). Access control for this table is fully handled one layer up, at the application's own `CanWrite` service-principal check (§24.1.2, ddd-model.md's Domain Invariants) restricting `POST /inventory/reserve`/`POST /inventory/release` to Order Service's own client-credentials principal — `ENABLE ROW LEVEL SECURITY` is not applied.
+- **`warehouse_stock`, `reservation_allocations`** — keyed on warehouse/SKU/reservation identifiers with no end-user ownership dimension at all (the same no-ownership-dimension carve-out already established for `kart-product-service`'s `variants` and `kart-category-service`'s `categories`); no RLS policy applies.
+- **`inventory_outbox_events`** — an internal relay table read exclusively by this service's own Outbox relay process, never by any end-user- or admin-facing request path directly; `created_by`/`aggregate_ref` record provenance for audit, not an access-control predicate, the same carve-out every other Outbox table on this platform already documents.
+- No MongoDB read model exists for this service (only a short-TTL Redis cache-aside, not a rebuildable CQRS projection), so the §24.1.4 Mongo query-builder-filter alternative does not apply here either.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+**No sensitive/PII columns exist.** `warehouse_stock`'s quantities/thresholds, `reservations`' `order_id`/`sku`/`qty`/`status`/timing fields, and `reservation_allocations`' warehouse/quantity pairs are all operational stock-and-fulfillment data, not personal data about an individual. `order_id` alone, with no name/address/contact/payment data alongside it, carries no more sensitivity here than it does in Payment's own `payment_intents` (BRD §24.1.5's own worked example: Payment Service has "no unmasked PCI data... to protect in the first place"). Per §24.1.5's own reasoning ("sensitivity is domain knowledge"), the correct classification for this service's fulfillment data is an explicit statement that none applies.
 
 ## Indexing Rationale
 

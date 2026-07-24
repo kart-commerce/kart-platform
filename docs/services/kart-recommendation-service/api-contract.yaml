@@ -1,0 +1,193 @@
+# doc_type: api-contract
+# service: kart-recommendation-service
+# status: approved (no prior published contract to break — first issue; api-standards.md's
+#   "Human Approval Required: Yes, if this introduces a breaking change to an already-published
+#   contract; otherwise can be marked approved directly on first issue" — this is a first issue)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-recommendation-service/requirement-spec.md (approved; §5 "final contract
+#     (response shape, item count, pagination...) is the API Design Agent's job, not this spec's")
+#   - docs/services/kart-recommendation-service/edge-cases.md (approved; "Cold-start user" (always
+#     return a response, never empty/404) and "Stale recommendations after out-of-stock/discontinued"
+#     (synchronous availability filter at read time) fix this endpoint's response contract)
+#   - docs/services/kart-recommendation-service/ddd-model.md (RecommendationSet's fields; the
+#     Recommendation Model's blended score; the CanRead ownership invariant)
+#   - docs/services/kart-recommendation-service/design-decisions.md (timeout + circuit breaker,
+#     fail-open availability filter with a short-TTL Redis cache in front of it)
+#   - docs/services/kart-recommendation-service/architecture.md (P95<150ms/P99<400ms read-path NFR;
+#     the N+1 risk flagged for this stage, resolved below as a single batched internal lookup)
+#   - docs/standards/kart-conventions.md (API Versioning section — every service starts at /v1)
+#
+# Kart-conventions.md API Versioning note: this is a first issue at /v1, per the mandatory
+# "every service starts at /v1" rule — no prior version to deprecate.
+#
+# Idempotency-Key note (api-standards.md): not applicable — this contract exposes exactly one
+# read-only GET endpoint; the mandatory-Idempotency-Key rule is scoped to money-moving/non-retry-
+# safe writes, neither of which exists here (requirement-spec §1: Recommendation is a read-side,
+# consumer-only service with no client-initiated write or delete endpoint of any kind).
+#
+# N+1 mitigation note (architecture.md's own flagged follow-on): the per-candidate live
+# availability check (GET /inventory/{sku}, GET /products/{id}) is Recommendation's own *internal*
+# outbound call, invisible to this contract's caller — this file defines only the public
+# GET /recommendations/{userId} surface. The internal batching (GET /inventory?skus=...,
+# GET /products?ids=...) is documented in architecture.md/database-design.md, not repeated here
+# since it does not change this endpoint's own request/response shape.
+#
+# Always-a-response note (requirement-spec §4 Domain Invariant, restated in ddd-model.md's
+# RecommendationSet invariants): this endpoint never returns 404. An unknown/brand-new userId with
+# no RecommendationSet document yet still returns 200 with TrendingPool-sourced fallback content.
+#
+# Publishing a stable copy to kart-shared is deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-recommendation-service API
+  version: 1.0.0
+  description: >
+    Personalized "customers also bought"-style recommendations (BRD §2.1 item 18;
+    requirement-spec.md §1-§2). Pure read-side, consumer-only — this service owns no
+    client-initiated write or delete endpoint of any kind (requirement-spec.md §1).
+
+servers:
+  - url: https://api.kart.example/recommendations
+    description: >
+      Public API Gateway. Serves `GET /v1/recommendations/{userId}` only — reachable by
+      Client/Mobile/Web and by Support/Admin console (architecture.md Dependencies table).
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/recommendations/{userId}:
+    get:
+      operationId: getRecommendationsForUser
+      summary: Personalized recommendation list for one user, always populated.
+      description: >
+        Read-path NFR: P95 < 150ms, P99 < 400ms (architecture.md; requirement-spec §3).
+        Serves the precomputed `RecommendationSet` (ddd-model.md), blending purchase
+        co-occurrence, decayed behavioral signal, and a trending baseline (the Recommendation
+        Model). Cold-start users (no purchase/behavior signal) and users with no
+        `RecommendationSet` document yet both receive `TrendingPool`-sourced fallback content
+        instead of an empty or error response (requirement-spec §4 Domain Invariant). Every
+        returned item has already passed the live inventory/catalog availability filter
+        (edge-cases.md), which fails open (serves the item unfiltered) on a timeout/circuit-trip
+        against Inventory or Product — see `availabilityFilterApplied` below, which surfaces
+        that degraded state rather than hiding it (`ddd-cqrs-standards.md`'s "eventual
+        consistency windows must be surfaced to the client, never hidden").
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: >
+            The Identity-issued `UserId` (ddd-model.md — referenced, never redefined here).
+            CanRead requires the caller's own `token.sub` to equal this value, unless the
+            caller holds the Admin or Support Agent role (ddd-model.md's CanRead invariant).
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+          description: >
+            Maximum items returned. No `page`/cursor parameter — a personalized recommendation
+            list is a bounded top-N ranked set by nature (ddd-model.md's `RecommendationSet.items`
+            is itself capped at write time), not a deeply paginated collection the way
+            `kart-search-service`'s catalog-wide result set is; a client wanting more than 50
+            items is outside this endpoint's intended use (engineering default, not BRD-stated).
+      responses:
+        '200':
+          description: >
+            Always returned for a syntactically valid, authorized `userId` — never `404`, even
+            for a `userId` with no purchase/behavioral history or no `RecommendationSet` document
+            yet (requirement-spec §4 Domain Invariant; see `source` on each item).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationResponse'
+        '400':
+          description: Malformed request — `userId` not a valid UUID, or `limit` out of `[1,50]`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: >
+            Authenticated caller's `token.sub` does not match the path `userId`, and the caller
+            holds neither the Admin nor Support Agent role (ddd-model.md's CanRead invariant;
+            BRD §24.1.2's Cart/Wishlist/User Service precedent for the same ownership-check shape).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Identity-issued access token (BRD §24.1). `sub` claim carries the caller's `UserId`; `roles` claim carries `Customer`/`Admin`/`Support Agent`.
+
+  schemas:
+    RecommendedItem:
+      type: object
+      required: [sku, score, source]
+      properties:
+        sku: { type: string }
+        score:
+          type: number
+          format: double
+          description: >
+            The Recommendation Model's blended score (ddd-model.md) — purchase affinity,
+            behavioral signal, and trending baseline combined. Not independently meaningful
+            across users/requests; valid only for ordering within this one response.
+        source:
+          type: string
+          enum: [Personalized, Fallback]
+          description: >
+            `Personalized` when `purchaseAffinity` or `behaviorSignal` contributed a non-zero
+            term (ddd-model.md); `Fallback` when the item came from `TrendingPool` only (a
+            genuine cold-start user, or a newly catalogued product still on its neutral seed).
+
+    RecommendationResponse:
+      type: object
+      required: [userId, items, generatedAt, availabilityFilterApplied]
+      properties:
+        userId: { type: string, format: uuid }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RecommendedItem' }
+          description: >
+            Ranked, highest score first, capped at `limit`. Every item has already passed the
+            live availability filter (out-of-stock/discontinued items are removed before this
+            list is capped to `limit`, so a `limit`-sized response is never short by a filtered
+            item unless fewer than `limit` candidates exist at all).
+        generatedAt:
+          type: string
+          format: date-time
+          description: >
+            The `RecommendationSet`'s own `generatedAt` (ddd-model.md) — when the underlying
+            precomputed list was last (re)computed, not when this HTTP response was served. For
+            a `userId` with no `RecommendationSet` document yet, this is `TrendingPool`'s own
+            `computedAt` instead, since the fallback content's freshness is what's actually being
+            reported in that case.
+        availabilityFilterApplied:
+          type: boolean
+          description: >
+            `false` only when the live Inventory/Product availability check's circuit breaker
+            was open or the call timed out for this request, and the fail-open mitigation
+            (`design-decisions.md`) served `items` unfiltered rather than dropping every
+            candidate — surfaced explicitly rather than silently returning a possibly-unsellable
+            item with no indication anything degraded (`ddd-cqrs-standards.md`).
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [VALIDATION_ERROR, UNAUTHENTICATED, FORBIDDEN_OWNERSHIP_MISMATCH]
+        message: { type: string }
+        timestamp: { type: string, format: date-time }

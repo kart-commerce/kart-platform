@@ -1,0 +1,268 @@
+# doc_type: api-contract
+# service: kart-order-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source: docs/services/kart-order-service/ddd-model.md, docs/services/kart-order-service/architecture.md,
+#   docs/services/kart-order-service/design-decisions.md, docs/adr/0012-payment-chargeback-handling.md,
+#   docs/adr/0015-shipping-shipment-creation-failed-event.md
+#
+# Every service starts at /v1 (kart-conventions.md's API Versioning section). Idempotency-Key is
+# mandatory on POST /orders (money-adjacent, per api-standards.md and requirement-spec Open
+# Questions resolution #3). Publishing a stable copy to a shared-contracts repo (kart-shared) is
+# deferred until that repo exists in this pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-order-service API
+  version: 1.0.0
+  description: >
+    Order lifecycle and Saga orchestration. `POST /orders` returns 202 Accepted after the
+    write-side transaction commits (BRD §7 CQRS) — Saga completion is asynchronous to the
+    request. `GET /orders/{id}` reads the MongoDB projection, never PostgreSQL directly.
+
+servers:
+  - url: https://api.kart.example/order
+    description: >
+      Public API Gateway. Serves the client-facing checkout/order-management path —
+      `/v1/orders`, `/v1/orders/{id}`, `/v1/orders/{id}/cancel`.
+  - url: https://internal.kart.local/order
+    description: >
+      Internal network segment. Serves `/v1/orders/{id}/resolve-fulfillment-exception`,
+      reachable only by Admin Service's client-credentials service principal (architecture.md,
+      mirroring ADR-0010's platform-wide admin-write integration pattern).
+
+paths:
+  /v1/orders:
+    post:
+      operationId: createOrder
+      summary: Create an order and begin the Saga (synchronous Inventory reserve, then async onward).
+      description: >
+        Commits the order + OrderLineItems + the initial OrderCreated outbox row in one
+        transaction, then synchronously calls Inventory's POST /inventory/reserve (ADR-0009;
+        2s timeout, circuit breaker — design-decisions.md) before returning. Everything from
+        Payment onward is async (ADR-0002). A retried request reusing the same Idempotency-Key
+        returns the original order's representation — no second order is created
+        (ddd-model.md's IdempotencyKey invariant).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: Deduplicated via a unique constraint on Order (requirement-spec Open Questions resolution #3).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, items, currency]
+              properties:
+                userId: { type: string, format: uuid }
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [sku, qty, unitPrice]
+                    properties:
+                      sku: { type: string }
+                      qty: { type: integer, minimum: 1 }
+                      unitPrice: { $ref: '#/components/schemas/Money' }
+                currency: { type: string, example: USD }
+      responses:
+        '202':
+          description: >
+            Order created (status=Created); OrderCreated published; Inventory reserve call
+            already completed synchronously by the time this response is returned. Saga
+            completion (Payment, Shipping, Delivery) proceeds asynchronously.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderView' }
+        '409':
+          description: >
+            Inventory reserve call returned insufficient stock (InventoryReservationFailed) —
+            no order is persisted in this case; the client should not retry with the same
+            Idempotency-Key expecting a different outcome without changing the request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: "Same Idempotency-Key reused with a materially different request body."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: "Inventory's synchronous reserve call timed out or its circuit breaker is open (2s budget, design-decisions.md)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Read an order's current state (served from the MongoDB read model).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderView' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/orders/{id}/cancel:
+    post:
+      operationId: cancelOrder
+      summary: Client-initiated cancellation. Legal only pre-Shipped.
+      description: >
+        Routed through the same Saga/compensation state machine as any other trigger — single
+        writer, no separate cancel code path (edge-cases.md, "Client Cancel Request Racing an
+        In-Flight Saga"). Rejected once the order is Shipped or later; the customer must use
+        Payment's separate returns/refund flow instead (requirement-spec Open Questions
+        resolution #2).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: >
+            Cancellation accepted; the order moves through OrderCompensationTriggered
+            (Inventory release, if a reservation is still held) then OrderCancelled once
+            compensation completes. May not apply instantly if a Saga step is mid-flight —
+            the current step resolves first (edge-cases.md).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderView' }
+        '409':
+          description: "Order is already Shipped or later (or already terminal) — cancellation is illegal from this state."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/orders/{id}/resolve-fulfillment-exception:
+    post:
+      operationId: resolveFulfillmentException
+      summary: Resolve an order held in FulfillmentException. Internal, admin-only.
+      description: >
+        New endpoint, resolved at the Architecture Agent stage (architecture.md) to close
+        requirement-spec's carried-forward API-surface question for ADR-0015's
+        "held/fulfillment-exception" reaction. Callable only by Admin Service's
+        client-credentials service principal (ADR-0010's platform-wide pattern). Two legal
+        actions:
+          - `retry`: transitions FulfillmentException → Paid and republishes OrderConfirmed
+            (the same signal Shipping's consumer already knows how to handle — Shipping's own
+            "a shipment must never be created twice for the same order" invariant makes this
+            safe to re-consume; no new event or Shipping-side mechanism is introduced).
+          - `cancel`: attempts a conditional, idempotent Inventory release first (a no-op in the
+            overwhelmingly common case, since the reservation TTL has almost always already
+            elapsed by this point), then calls Payment's POST /payments/{id}/refund synchronously
+            (the same compensation-refund mechanism as the Payment-succeeds/Shipping-fails path);
+            only once the refund call succeeds does the order transition
+            FulfillmentException → Cancelled (OrderCompensationTriggered, then OrderCancelled —
+            ddd-model.md's Compensation completeness invariant).
+      security:
+        - clientCredentials: [admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [retry, cancel] }
+      responses:
+        '200':
+          description: Resolution applied; see the OrderView's new status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderView' }
+        '409':
+          description: "Order is not currently in FulfillmentException — nothing to resolve."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Caller is not Admin Service's confirmed service principal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            admin: "Admin-scoped service principal (Admin Service calling Order's resolution endpoint) — Identity-issued, never validated locally"
+
+  schemas:
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
+
+    OrderLineItemView:
+      type: object
+      required: [sku, qty, unitPrice]
+      properties:
+        sku: { type: string }
+        qty: { type: integer }
+        unitPrice: { $ref: '#/components/schemas/Money' }
+
+    OrderView:
+      type: object
+      required: [orderId, userId, status, items, totalAmount, createdAt]
+      properties:
+        orderId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [Created, Reserved, Paid, Shipped, Delivered, FulfillmentException, Cancelled, Refunded]
+          description: ddd-model.md's OrderStatus value object — the full legal-transition graph is documented there, not re-derived here.
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderLineItemView' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        createdAt: { type: string, format: date-time }

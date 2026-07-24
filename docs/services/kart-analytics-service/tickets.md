@@ -1,18 +1,18 @@
 ---
 doc_type: tickets
 service: kart-analytics-service
-status: draft
+status: approved
 generated_by: ticket-agent
-source: [architecture.md, api-contract.yaml, database-design.md, event-contract.md, design-decisions.md, requirement-spec.md, edge-cases.md — no ddd-model.md exists for this service, see note below]
+source: [architecture.md, ddd-model.md, api-contract.yaml, database-design.md, event-contract.md, design-decisions.md, requirement-spec.md, edge-cases.md]
 ---
 
 # Tickets: kart-analytics-service
 
 Local draft. Not yet created as real GitHub Issues — that requires the target repo to exist (Project Scaffold Agent) and is a separate, explicit step.
 
-**No `ddd-model.md` input for this service (documented precedent, not a gap):** `database-design.md`'s own header note (restated by `event-contract.md`) records that Analytics is a **Generic Subdomain** with no transactional aggregate root of its own beyond "the raw ingested event" and "the derived read model" — narrow enough that `architecture.md`, `database-design.md`, and `event-contract.md` were all designed directly from `requirement-spec.md`/`edge-cases.md`/`design-decisions.md` without a dedicated DDD-Agent pass, the same precedent already used by `kart-admin-service`. This decomposition follows that same reasoning rather than blocking on a doc this service was never going to produce.
+**Superseded note (corrected on this pass):** this section previously read "no `ddd-model.md` exists for this service," citing the same precedent recorded in `kart-admin-service/database-design.md`. `docs/services/kart-analytics-service/ddd-model.md` has since been authored — four aggregate roots (`IngestedEvent`, `DeadLetteredEvent`, `ReconciliationRun`, `PiiRedactionRecord`), fully consistent with the schema/event-catalog this ticket list already decomposes from. Corrected in place rather than left to drift, the same way `database-design.md`/`event-contract.md` already corrected their own identical stale notes.
 
-**Approval-checkbox flag (carried forward, not blocking):** `architecture.md`, `design-decisions.md`, `database-design.md`, and `event-contract.md` all still carry an unchecked sign-off checkbox (frontmatter `status: pending-approval`) even though `requirement-spec.md` and `edge-cases.md` are now fully closed (`status: approved`, all former Open Questions resolved via ADR-0004 and D2/D3/D4a/D4b/D5/D6a) and every downstream doc is internally consistent with them — each of those four docs says so explicitly in its own header. `api-contract.yaml` is the one doc already `approved` (no prior published contract to break). This ticket list is decomposed directly from all four docs' already-decided content; no open question in any of them blocks right-sizing the work below. Re-confirm against those four once a human checks their sign-off boxes — no substantive rework is expected.
+**Approval status:** `requirement-spec.md`, `edge-cases.md`, `design-decisions.md`, `architecture.md`, `ddd-model.md`, `database-design.md`, `event-contract.md`, and `api-contract.yaml` are all now `status: approved`. This pass also found and corrected a cross-service staleness gap in `event-contract.md`: `kart-order-service`'s five lifecycle events (`OrderCreated`/`OrderConfirmed`/`OrderCancelled`/`OrderCompensationTriggered`/`OrderDelivered`) were cited at BRD §10's original 3x/shared-`order.dlq` tier, since elevated by that service's own approved contract to 5x exponential/paged-on-call with per-event DLQs; `ReviewUpdated`'s "provisional" tier is now confirmed; `UserDataErased`'s DLQ name is now finalized (`analytics.user-data-erased.dlq`). None of these changed any ticket's scope or dependency graph below — they are retry-tier/DLQ-naming corrections on the delivery-to-Analytics side, not schema or endpoint changes.
 
 ## Epic: kart-analytics-service v1
 

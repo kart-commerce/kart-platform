@@ -42,6 +42,20 @@ CREATE TABLE carts (
                                 -- against — Postgres itself does not observe reads (only Redis,
                                 -- which owns its own TTL reset on read, does), so a write-only
                                 -- touch timestamp is the correct, and only available, anchor here.
+    created_by          TEXT NOT NULL,
+                                -- BRD §24.3 — the acting principal at insert time: the owning
+                                -- user_id/guest_session_id itself for a normal client-created
+                                -- cart, or 'system:cart-merge' for the surviving cart's own
+                                -- version bump during a merge (the row itself was already
+                                -- created earlier; merge only ever updates, never inserts, the
+                                -- surviving cart row).
+    updated_by          TEXT NOT NULL,
+                                -- BRD §24.3 — the owning user_id/guest_session_id for a direct
+                                -- /cart mutation or merge, or a well-known system:* id for a
+                                -- non-caller-triggered write (system:cart-expiry-purge-job for
+                                -- the soft-expiry purge job below, system:user-service-erasure-
+                                -- consumer for a UserDataErased-triggered delete — see the
+                                -- "Row-Level Security Policy" and erasure sections below).
 
     CHECK (
         (user_id IS NOT NULL AND guest_session_id IS NULL)
@@ -91,6 +105,18 @@ CREATE TABLE cart_line_items (
                                 -- LineItemAvailability (ddd-model.md) — set by consuming
                                 -- InventoryReservationFailed pre-checkout only (Decision D3),
                                 -- cleared on the line's next successful validation.
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped on quantity/availability change
+    created_by           TEXT NOT NULL,
+                                -- BRD §24.3 — the owning cart's user_id/guest_session_id for a
+                                -- direct add, or 'system:cart-merge' for a line item created by
+                                -- folding a guest cart's line into the surviving user cart
+                                -- (Modeling Decision #1)
+    updated_by           TEXT NOT NULL,
+                                -- BRD §24.3 — the owning cart's user_id/guest_session_id for a
+                                -- direct quantity change or merge, or
+                                -- 'system:inventory-reservation-failed-consumer' for an
+                                -- availability-flag update (Decision D3)
 
     CONSTRAINT uq_cart_line_items_cart_sku UNIQUE (cart_id, sku)
 );
@@ -118,7 +144,16 @@ CREATE TABLE cart_outbox_events (
     payload              JSONB NOT NULL,
                                 -- {cartId, userId, items} per event-contract.md.
     occurred_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at         TIMESTAMPTZ NULL
+                                -- this table's created_at under BRD §24.3, in the domain's own
+                                -- event vocabulary
+    published_at         TIMESTAMPTZ NULL,
+    created_by           TEXT NOT NULL,
+                                -- BRD §24.3 — the owning user_id (checkout is a logged-in-only
+                                -- flow) whose checkout produced this outbox row
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped when published_at is set
+    updated_by           TEXT NOT NULL DEFAULT 'system:cart-outbox-relay'
+                                -- BRD §24.3 — the Outbox relay is the only process that ever
+                                -- updates a row after insert
 );
 
 -- The Outbox relay's own scan: "find everything not yet published, oldest first" — same
@@ -131,6 +166,61 @@ CREATE INDEX idx_cart_outbox_unpublished
 ### GDPR Erasure — `UserDataErased` Write Path (ADR-0016)
 
 Per `design-decisions.md`'s "Erasure Mechanism for `UserDataErased`" decision and `ddd-model.md`'s invariant 6: on consuming `UserDataErased` for a `user_id`, one handler transaction runs `DELETE FROM carts WHERE user_id = ?` (cascading to `cart_line_items` via `ON DELETE CASCADE`, and to any not-yet-published `cart_outbox_events` row for that cart) — hard delete, no tombstone column, since neither an `Active` nor a `CheckedOut` cart is BRD-required retained history (ADR-0016 item 3). `idx_carts_user_id` backs this with an index scan across every status, not just `active`. The handler also evicts the corresponding Redis cache entry (below) in the same logical operation. A redelivered `UserDataErased` for an already-erased `user_id` deletes zero rows — a no-op, not an error, satisfying the idempotent-consumer invariant already required of `InventoryReservationFailed` handling.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security — never a shared, central component. Cart's write model is entirely PostgreSQL (`carts`, `cart_line_items`, `cart_outbox_events`), and both `carts` and `cart_line_items` have a genuine per-row end-user ownership concept (`carts.user_id`/`guest_session_id`, and `cart_line_items` transitively via its parent `cart_id`), so native RLS is the mechanism for each.
+
+**Session-scoped principal setting.** Same ambient mechanism already established platform-wide (see `kart-identity-service/database-design.md`'s precedent): immediately after acquiring a pooled connection and before any query runs, this service issues `SET LOCAL app.current_principal = <id>` and `SET LOCAL app.current_principal_kind = <'user'|'guest'|'system'>`, resolved server-side from the validated JWT (`user`), the presented guest-session identifier (`guest`), or the internal job/consumer context (`system`) — never a client-suppliable value. This is the same resolved-principal value the shared `kart-shared` `created_by`/`updated_by` interceptor (§24.3, below) stamps onto every mutation — RLS and audit-column injection read one ambient current-principal accessor from that same package, not two independently-maintained notions of "who is acting."
+
+**Policy shape.**
+
+```sql
+ALTER TABLE carts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY carts_owner_isolation ON carts
+    USING (
+        current_setting('app.current_principal_kind') = 'system'
+        OR (current_setting('app.current_principal_kind') = 'user'
+            AND user_id = current_setting('app.current_principal')::uuid)
+        OR (current_setting('app.current_principal_kind') = 'guest'
+            AND guest_session_id = current_setting('app.current_principal'))
+    );
+
+ALTER TABLE cart_line_items ENABLE ROW LEVEL SECURITY;
+
+-- cart_line_items has no owner column of its own (ddd-model.md: identity is sku-within-cart,
+-- not a per-row user/guest reference) — the policy joins back to the parent carts row to reuse
+-- exactly the same ownership predicate rather than duplicating owner columns onto every line
+-- item purely to satisfy RLS, which would re-denormalize data the aggregate boundary already
+-- keeps on the parent.
+CREATE POLICY cart_line_items_owner_isolation ON cart_line_items
+    USING (
+        current_setting('app.current_principal_kind') = 'system'
+        OR EXISTS (
+            SELECT 1 FROM carts c
+            WHERE c.cart_id = cart_line_items.cart_id
+              AND (
+                (current_setting('app.current_principal_kind') = 'user'
+                    AND c.user_id = current_setting('app.current_principal')::uuid)
+                OR (current_setting('app.current_principal_kind') = 'guest'
+                    AND c.guest_session_id = current_setting('app.current_principal'))
+              )
+        )
+    );
+```
+
+The `system` branch is not a blanket bypass: it is only ever reached by the soft-expiry purge job, the `UserDataErased` consumer, and the Outbox relay — internal processes no external caller can reach, and each already scoped to its own narrow query shape (a `user_id`-keyed bulk delete, an `updated_at`-keyed scan, an `outbox_id`-keyed update) rather than an open-ended query. RLS's marginal, additive protection here is specifically against the failure mode §24.1.4 itself names — a user-facing code path that forgets its own `WHERE user_id = ...`/`WHERE guest_session_id = ...` clause — which stays fully blocked whenever `app.current_principal_kind` is `user` or `guest`.
+
+`cart_outbox_events` is deliberately **not** given an owner-scoped RLS policy: it is never read or written by an end-user-facing request path at all (only the Outbox relay and the checkout handler that inserts a row touch it), the same "no per-row end-user ownership concept" carve-out BRD §24.1.4 itself anticipates via its Payment `payment_intents` example — access to it is already fully bounded by which internal process holds the database credential to begin with, not by a per-row predicate.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing.
+
+**Cart has no sensitive/PII columns to classify.** `carts` holds only an opaque `user_id`/`guest_session_id` owner reference (already governed by the RLS policy above, not by column-level masking — knowing *which* opaque id owns a cart one is already authorized to read is not itself a PII disclosure), `status`, and `version`. `cart_line_items` holds only `sku`, `quantity`, and `availability` — commercial/catalog data, not personal data about the cart's owner. `cart_outbox_events.payload` carries `{cartId, userId, items}`, the same shape already visible to the owning caller via the API; Analytics (the sole consumer, requirement-spec §5) is a trusted internal system context, not a caller subject to per-role masking. This mirrors BRD §24.1.5's own reasoning for Payment Service ("no unmasked PCI data exists to protect in the first place") — Cart's columns are simply never the kind of column §24.1.5 exists to gate, the same conclusion for a structurally different reason (commercial/session data rather than tokenized-at-the-gateway payment data).
+
+**Enforcement point:** not applicable — there is no column requiring role-differentiated response shaping. If a future requirement introduces a genuinely sensitive column onto one of these tables (none is anticipated by this service's current domain), the primary control would be this service's own response-serialization DTO (api-contract.yaml) per §24.1.5's stated default, consistent with every other service on this platform.
 
 ## Cache (Redis) — Write-Through, Not a CQRS Read Model
 

@@ -1,0 +1,81 @@
+# doc_type: api-contract
+# service: kart-notification-service
+# status: approved (no prior published contract to break — first issue; no breaking-change risk possible, see below)
+# generated_by: api-design-agent
+# source:
+#   - docs/services/kart-notification-service/requirement-spec.md (approved; §5 API Surface: "Expose no
+#     inbound public API — Notification is consumer-only ... it is driven entirely by the message bus")
+#   - docs/services/kart-notification-service/edge-cases.md (approved; no edge case in this document
+#     names or implies any synchronous inbound surface — every decision here is about consumer
+#     concurrency, dedup, resilience, and retry/DLQ tiering, none of it API-shaped)
+#   - docs/services/kart-notification-service/design-decisions.md (approved; "Communication Style —
+#     Consumer-Only Async Messaging over RabbitMQ" decision: "no inbound public API of any kind")
+#   - docs/services/kart-notification-service/architecture.md (approved; Boundary Rationale: "No public
+#     API, consumer-only ... It has no inbound synchronous surface of any kind"; explicitly rules out
+#     even a narrow internal preference-write API in favor of the new `UserNotificationPreferenceUpdated`
+#     consumed event, "ruled out directly by this service's own no-public-API boundary")
+#   - docs/services/kart-notification-service/ddd-model.md (approved; sign-off line: "Approved to
+#     proceed to Database/Event Design Agents (no API Design Agent — Notification has no public API
+#     surface, per architecture.md's Boundary Rationale)")
+#   - docs/standards/api-standards.md, docs/standards/kart-conventions.md (API Versioning section)
+#
+# Path-taken note (per this run's instructions): the two precedent internal-only contracts
+# (kart-shipping-service/api-contract.yaml's `/v1/shipments` ops query/manual-creation surface;
+# kart-delivery-tracking-service/api-contract.yaml's public GET + internal webhook surface) were
+# both produced because their own requirement-spec.md/edge-cases.md/architecture.md *explicitly
+# named* an unresolved API need this stage was asked to close (Shipping: "query and/or manual
+# shipment creation... final shape is the API Design Agent's job"; Delivery Tracking: a
+# customer-facing tracking read plus carrier-webhook ingestion, both stated in requirement-spec §5).
+# No equivalent need exists anywhere in this service's own docs. Every one of the five upstream
+# documents affirmatively states Notification is consumer-only with no inbound surface at all — not
+# merely silent on the question. The one candidate that could have warranted an API (a way for a
+# user to *set* notification preferences) was explicitly evaluated and explicitly rejected in favor
+# of an event (architecture.md's "Resolved Integration-Contract Question" section): a dedicated
+# Notification-owned API for this "would contradict the architectural property this spec and
+# design-decisions.md both commit to elsewhere." No ops/audit/resend/query surface for support
+# tooling is named or implied anywhere in requirement-spec.md or edge-cases.md either — the audit
+# trail requirement-spec §4's Domain Invariant #1 requires is a persistence guarantee inside the
+# PostgreSQL audit store (`NotificationAttempt`, ddd-model.md), not a stated requirement to expose
+# that store over an API surface of any kind, internal or public. Fabricating one here (e.g. an
+# ops query over `NotificationAttempt` rows, mirroring Shipping's `/v1/shipments`) would be
+# inventing scope no upstream document asked for, which this stage's instructions direct against.
+#
+# Conclusion: this file documents the absence of an API surface rather than defining one. It exists
+# so the pipeline has a `docs/services/kart-notification-service/api-contract.yaml` artifact
+# consistent with every other service's file layout, and so that fact is explicit and discoverable
+# rather than inferred from a missing file. If a genuine internal-ops need for this service (e.g. a
+# delivery-status/audit query for support tooling) is identified in a future requirements pass, that
+# is new scope for the Requirement Agent to capture first — not something for this stage to invent
+# unilaterally today.
+#
+# Versioning note: since no endpoint is defined, there is nothing to version at `/v1` and no
+# Contract Compatibility Agent gate applies (kart-conventions.md's API Versioning section governs
+# published endpoints; none exist here). If a future pass adds a genuine endpoint, it starts at
+# `/v1` per that policy, same as every other Kart service.
+
+openapi: 3.0.3
+info:
+  title: kart-notification-service API
+  version: 1.0.0
+  description: >
+    This service exposes NO public API and NO internal-ops API. kart-notification-service is
+    consumer-only (requirement-spec.md §5.4/§2; reaffirmed verbatim in architecture.md's Boundary
+    Rationale and design-decisions.md's Communication Style decision) — it is driven entirely by
+    consuming events off the `ecommerce.events` RabbitMQ topic exchange (`order.*`, `payment.*`,
+    plus dedicated routing keys for `WishlistPriceAlertTriggered`, `UserRegistered`,
+    `ShipmentDispatched`, `DeliveryStatusUpdated`, and `UserNotificationPreferenceUpdated`) and
+    publishing one outbound audit event (`NotificationSent`). There is no synchronous inbound
+    surface of any kind for any client, service, or internal ops/support tool to call. The one
+    candidate synchronous surface considered upstream — a Notification-owned API for users to set
+    per-channel/per-category opt-out preferences — was explicitly evaluated and rejected in favor
+    of the `UserNotificationPreferenceUpdated` consumed event (architecture.md's "Resolved
+    Integration-Contract Question" section), precisely to preserve this no-public-API boundary.
+    All request/response contracts for this service belong in its `event-contract.md` (Event
+    Design Agent's output), not this file. This document is intentionally empty of paths; it
+    exists to make the absence of an API surface explicit and discoverable, not to define one.
+
+servers: []
+
+paths: {}
+
+components: {}

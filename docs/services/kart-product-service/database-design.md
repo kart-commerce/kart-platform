@@ -24,7 +24,9 @@ CREATE TABLE product_groups (
     brand        TEXT,
     status       TEXT NOT NULL CHECK (status IN ('Draft', 'Published', 'Archived')) DEFAULT 'Draft',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by   TEXT NOT NULL,          -- BRD §24.3: the Admin/Partner API client identity that created this product group -- no self-service end-user write path exists for Product
+    updated_by   TEXT NOT NULL          -- BRD §24.3: the Admin/Partner API client identity that performed the most recent parent-field edit or archive
 );
 
 -- Supports the polling-free "is this group's category ever queried on its
@@ -47,7 +49,9 @@ CREATE TABLE variants (
     color                TEXT,              -- first-class indexed attribute
     extended_attributes JSONB NOT NULL DEFAULT '{}',  -- schemaless bag for everything else (ddd-model.md ProductAttributes)
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by          TEXT NOT NULL,   -- BRD §24.3: the Admin/Partner API client identity that created this SKU
+    updated_by          TEXT NOT NULL   -- BRD §24.3: the Admin/Partner API client identity that performed the most recent price/status/attribute write
 );
 
 -- Point-lookup/write index for the PATCH /v1/products/{sku} write path and
@@ -81,8 +85,10 @@ CREATE TABLE product_outbox_events (
     event_type   TEXT NOT NULL,       -- ProductCreated | ProductPriceChanged | ProductUpdated | ProductDiscontinued
     sku          TEXT NOT NULL,       -- every published event is SKU-keyed (ddd-model.md)
     payload      JSONB NOT NULL,
-    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ          -- null until the poller confirms RabbitMQ publish
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
+    published_at TIMESTAMPTZ,         -- null until the poller confirms RabbitMQ publish
+    created_by   TEXT NOT NULL,       -- BRD §24.3: the principal whose domain mutation produced this outbox row -- the Admin/Partner API client identity
+    updated_by   TEXT NOT NULL DEFAULT 'system:product-outbox-poller' -- BRD §24.3: the Outbox poller is the only process that ever updates a row after insert (setting published_at)
 );
 
 CREATE INDEX idx_product_outbox_unpublished ON product_outbox_events (id) WHERE published_at IS NULL;
@@ -130,6 +136,18 @@ sh.shardCollection("kart.product_read_model", { "category.id": 1 })
 // this document's primary access path.
 db.product_read_model.createIndex({ productGroupId: 1 })
 ```
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Unlike the majority of the platform's Postgres-backed services (Identity, User, Order, Cart, Wishlist — all keyed on `user_id`), **none of Product's tables have a per-row end-user ownership column at all**, so native RLS's ownership predicate has nothing to key on here — this is the same carve-out BRD §24.1.4 itself anticipates via its own Payment `payment_intents` example ("never stores `user_id` directly... a `user_id`-shaped row-level policy would not even apply") and the one `kart-identity-service/database-design.md` already applies to `idp_group_role_mappings`/`service_principals` (operator/platform-managed rows, not owned per-row by any interactive end user).
+
+- **`product_groups`, `variants`** — no per-row ownership concept: a catalog SKU is public storefront data, not owned by the principal who happens to have created or last edited it (`created_by`/`updated_by` above are audit provenance, not an access-control predicate — the same distinction `kart-identity-service/database-design.md` draws for its own `outbox_events.aggregate_id`). Access control for these tables is fully handled one layer up, at the application's own `CanWrite` role-claim check (§24.1.2, ddd-model.md's Domain Invariants) — `ENABLE ROW LEVEL SECURITY` is not applied to either table, since there is no row-ownership dimension for a policy predicate to express. `CanRead` is unconditional (any principal), so no read-side filtering is needed either.
+- **`product_outbox_events`** — an internal relay table read exclusively by this service's own Outbox poller process, never by any end-user- or admin-facing request path directly; `created_by` records event-payload provenance for audit, not an access-control predicate, the same carve-out `kart-identity-service`/`kart-user-service`'s own outbox tables already document.
+- **`product_read_model` (MongoDB)** — a fully public, non-principal-scoped projection (`GET /products/{id}` is unconditional `CanRead`, per ddd-model.md); no per-caller query-builder filter is needed at the data-access boundary, since every document is visible to every caller regardless of role.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+**No sensitive/PII columns exist.** Every column across `product_groups`, `variants`, and `product_read_model` — `name`, `description`, `brand`, `category`, `price`, `size`/`color`/`extended_attributes`, `status` — is public storefront catalog content, not personal data about any individual, and there is no analogue here to Payment's tokenized-credential case or User's address/phone. `created_by`/`updated_by` identify an Admin/Partner API *client*, not an end customer, so they carry no PII-masking concern either. Per §24.1.5's own reasoning ("sensitivity is domain knowledge... There is no platform-wide 'sensitive column' list"), the correct classification for a public catalog service is an explicit statement that none applies, rather than forcing an artificial masking rule onto fields with no sensitivity to protect.
 
 ### Concurrency Control at the Read-Model Layer (implements design-decisions.md's decision, doesn't re-derive it)
 
