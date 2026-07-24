@@ -26,9 +26,11 @@ CREATE TABLE reviews (
     pending_revision     JSONB NULL,                 -- PendingRevision value object: { newBodyText, newRating, submittedAt } — at most one at a time, overwritten in place, never a queue (ddd-model.md Invariant)
     first_published_at   TIMESTAMPTZ NULL,           -- set exactly once; drives every ReviewSubmitted/ReviewUpdated/ReviewUnpublished firing decision (ddd-model.md Modeling Decision 6)
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_edited_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_edited_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- this table's updated_at under BRD §24.3, in the domain's own vocabulary
     retracted_at          TIMESTAMPTZ NULL,
     idempotency_key       TEXT NOT NULL,             -- creation-request dedup only, see Idempotency-Key Replay Window below
+    created_by            TEXT NOT NULL,             -- BRD §24.3 -- always the owning userId; every insert is the author's own POST /reviews submission
+    updated_by            TEXT NOT NULL,             -- BRD §24.3 -- the owning userId for a self-service edit/retraction, or the moderating Support Agent's/Admin's own userId for an accept/reject/takedown via PATCH /reviews/{id}/moderate (ddd-model.md's audit-actor invariant)
     UNIQUE (order_id, sku),                          -- one Review per (order, sku), PERMANENT — never released even in a terminal state
                                                        -- (requirement-spec §4/§6 Q6; ddd-model.md Modeling Decision 8's occupancy consequence)
     UNIQUE (idempotency_key)                          -- mirrors kart-order-service's simpler global-unique pattern, not Payment's
@@ -73,7 +75,10 @@ CREATE TABLE review_outbox (
     event_type     VARCHAR(24) NOT NULL CHECK (event_type IN ('ReviewSubmitted', 'ReviewUpdated', 'ReviewUnpublished')),
     payload        JSONB NOT NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at   TIMESTAMPTZ NULL
+    published_at   TIMESTAMPTZ NULL,
+    created_by     TEXT NOT NULL,                     -- BRD §24.3 -- the principal whose reviews write produced this row: the author's userId (ReviewSubmitted/ReviewUpdated from a self-service edit) or the moderating Support Agent's/Admin's userId (ReviewSubmitted/ReviewUnpublished from a moderator action)
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- BRD §24.3; bumped when published_at is set
+    updated_by     TEXT NOT NULL DEFAULT 'system:review-outbox-poller' -- BRD §24.3 -- the Outbox poller is the only process that ever updates a row after insert
 );
 
 CREATE INDEX idx_review_outbox_unpublished ON review_outbox (created_at)
@@ -81,9 +86,13 @@ CREATE INDEX idx_review_outbox_unpublished ON review_outbox (created_at)
 
 -- ProductRating aggregate root (ddd-model.md, ADR-0014's canonical rating aggregate)
 CREATE TABLE product_ratings (
-    sku     TEXT PRIMARY KEY,       -- reference, kart-product-service
-    avg     DOUBLE PRECISION NOT NULL DEFAULT 0,   -- RatingAverage value object; weighted-incremental only, never a full recompute
-    count   INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0)   -- RatingCount value object
+    sku          TEXT PRIMARY KEY,       -- reference, kart-product-service
+    avg          DOUBLE PRECISION NOT NULL DEFAULT 0,   -- RatingAverage value object; weighted-incremental only, never a full recompute
+    count        INTEGER NOT NULL DEFAULT 0 CHECK (count >= 0),   -- RatingCount value object
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),    -- BRD §24.3; set on the first-ever review for this sku (the ON CONFLICT DO NOTHING insert below)
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),    -- BRD §24.3; bumped on every ReviewSubmitted/ReviewUpdated/ReviewUnpublished-driven UPDATE
+    created_by   TEXT NOT NULL DEFAULT 'system:review-rating-projector',  -- BRD §24.3 -- this table is written exclusively by the async Outbox-relay ProductRating consumer (ddd-model.md), never a direct API caller
+    updated_by   TEXT NOT NULL DEFAULT 'system:review-rating-projector'   -- same reasoning as created_by -- no human/API caller ever writes this table directly
 );
 
 -- ProcessedReviewLedger value object (ddd-model.md) — a SEPARATE table, not a jsonb/array column
@@ -105,7 +114,10 @@ CREATE TABLE product_rating_ledger (
                           -- NULL once this (order_id, sku) entry has been unpublished/retracted (ddd-model.md);
                           -- never deleted even then — a deleted row would be indistinguishable from
                           -- "never processed," reopening the double-decrement race the ledger exists to close
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3; set on this (order_id, sku) pair's first-ever ledger entry
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by            TEXT NOT NULL DEFAULT 'system:review-rating-projector',  -- BRD §24.3 -- same async projector as product_ratings, never a direct API caller
+    updated_by            TEXT NOT NULL DEFAULT 'system:review-rating-projector',
     PRIMARY KEY (order_id, sku)   -- the dedup key ddd-model.md Modeling Decision 4 chose over raw reviewId,
                                    -- because it is present on ReviewSubmitted, ReviewUpdated, AND ReviewUnpublished alike
 );
@@ -116,8 +128,11 @@ CREATE TABLE verified_purchase_records (
     user_id        UUID NULL,        -- nullable until OrderCreated is consumed
     skus           TEXT[] NULL,      -- nullable/empty until OrderCreated is consumed; derived from OrderCreated's items array
     delivered_at   TIMESTAMPTZ NULL, -- nullable until OrderDelivered is consumed
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()   -- ops/partition-key metadata only — not part of ddd-model.md's own field list,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),  -- ops/partition-key metadata only — not part of ddd-model.md's own field list,
                                                           -- added here purely to support the partitioning flag below
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3; bumped by whichever of OrderCreated/OrderDelivered upserts second
+    created_by     TEXT NOT NULL DEFAULT 'system:review-verified-purchase-consumer',  -- BRD §24.3 -- written exclusively by the OrderCreated/OrderDelivered consumers (ddd-model.md); never a direct API caller
+    updated_by     TEXT NOT NULL DEFAULT 'system:review-verified-purchase-consumer'
 );
 ```
 
@@ -130,13 +145,15 @@ Both consumed events are full-field upserts targeting the *same* row/key, so the
 INSERT INTO verified_purchase_records (order_id, user_id, skus)
 VALUES ($1, $2, $3)
 ON CONFLICT (order_id) DO UPDATE
-    SET user_id = EXCLUDED.user_id, skus = EXCLUDED.skus;
+    SET user_id = EXCLUDED.user_id, skus = EXCLUDED.skus,
+        updated_at = now(), updated_by = 'system:review-verified-purchase-consumer';  -- BRD §24.3
 
 -- On consuming OrderDelivered (seeds delivered_at; never touches userId/skus)
 INSERT INTO verified_purchase_records (order_id, delivered_at)
 VALUES ($1, $2)
 ON CONFLICT (order_id) DO UPDATE
-    SET delivered_at = EXCLUDED.delivered_at;
+    SET delivered_at = EXCLUDED.delivered_at,
+        updated_at = now(), updated_by = 'system:review-verified-purchase-consumer';  -- BRD §24.3
 ```
 
 `POST /reviews`'s gate check (requirement-spec §6 Q2's exact rejection wording) is a single `SELECT ... WHERE order_id = $1` against this table's primary key, then an application-layer check that a row exists, `delivered_at IS NOT NULL`, `user_id` matches the caller, and `sku = ANY(skus)` — a single indexed-PK lookup, no additional index needed for any part of that check.
@@ -158,17 +175,69 @@ SELECT last_applied_rating FROM product_rating_ledger
 
 UPDATE product_ratings
    SET count = count + 1,                                  -- ReviewSubmitted
-       avg   = avg + ($rating - avg) / (count + 1)
+       avg   = avg + ($rating - avg) / (count + 1),
+       updated_at = now(), updated_by = 'system:review-rating-projector'  -- BRD §24.3
  WHERE sku = $sku;
 
-INSERT INTO product_rating_ledger (order_id, sku, last_applied_rating, updated_at)
-VALUES ($order_id, $sku, $rating, now())
+INSERT INTO product_rating_ledger (order_id, sku, last_applied_rating, updated_at, created_by, updated_by)
+VALUES ($order_id, $sku, $rating, now(), 'system:review-rating-projector', 'system:review-rating-projector')
 ON CONFLICT (order_id, sku) DO UPDATE
-    SET last_applied_rating = EXCLUDED.last_applied_rating, updated_at = now();
+    SET last_applied_rating = EXCLUDED.last_applied_rating, updated_at = now(),
+        updated_by = 'system:review-rating-projector';  -- BRD §24.3
 COMMIT;
 ```
 
 `ReviewUpdated` and `ReviewUnpublished` follow the identical shape with `avg`/`count` adjusted per ddd-model.md's stated formulas (`(newRating - oldRating) / count`, and `count -= 1` with the last-known contribution removed, respectively) and the ledger row's `last_applied_rating` set to the new rating or `NULL`. This is always a narrow, single-row `UPDATE` on `product_ratings` plus a single-row upsert on `product_rating_ledger` — never a full recompute, and never a lock held across more than one transaction, per design-decisions.md's explicit rejection of pessimistic per-SKU locking.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Review's write model is PostgreSQL (see above); `reviews` and `verified_purchase_records` both have a genuine per-row end-user ownership concept, so native RLS is the mechanism for each.
+
+**Session-scoped principal setting.** Same ambient mechanism already established platform-wide (see `kart-identity-service/database-design.md`'s precedent, generic plumbing owned by the shared `kart-shared` `ICurrentPrincipalAccessor`, not reimplemented here): immediately after acquiring a pooled connection and before any query runs, this service issues `SET LOCAL app.current_principal = <id>`, `SET LOCAL app.current_principal_kind = <'user'|'service'|'system'>`, and — a service-specific addition this table's own predicate needs, see below — `SET LOCAL app.current_principal_role = <coarse role claim>`, all resolved server-side from the validated JWT context or the internal consumer/job context, never a client-suppliable value. `app.current_principal` is the caller's own `userId` for `POST /reviews`/`PATCH /reviews/{id}`/`DELETE /reviews/{id}`, or the moderating Support Agent's/Admin's own `userId` for `PATCH /reviews/{id}/moderate`; `app.current_principal_role` carries the same coarse role claim BRD §24.1.1 already embeds in the JWT (`Customer`/`Support Agent`/`Admin`/`Partner API`); `app.current_principal_kind` is `system` for the `OrderCreated`/`OrderDelivered`/rating-projection consumers. Carrying the coarse role alongside the principal id is not a second, independently-maintained notion of "who is acting" — it is the same JWT claim the shared accessor already reads to resolve the principal itself, merely also exposed to the RLS predicate below.
+
+**Policy shape — `reviews` (the one table needing a non-owner write path).** Unlike Wishlist/User/Identity's pure ownership-or-system predicates, Review's own `CanWrite` rule (requirement-spec §3; ddd-model.md's Domain Invariant above) legitimately grants a **non-owner** coarse role (Support Agent/Admin) a write path for moderation — reflected directly in the policy, not worked around with a service-principal indirection:
+
+```sql
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+CREATE POLICY reviews_owner_or_moderator ON reviews
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_role', true) IN ('Support Agent', 'Admin')
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+The role branch is not a blanket bypass: it mirrors exactly the same role gate requirement-spec.md's own §3 already applies to `PATCH /reviews/{id}/moderate` at the application layer (check #2 of BRD §24.1.3's enforcement flow) — RLS's marginal, additive protection here is specifically against the failure mode §24.1.4 itself names (an application code path that forgets to enforce that role gate), which stays blocked for any caller whose role is plain `Customer`.
+
+```sql
+-- verified_purchase_records
+ALTER TABLE verified_purchase_records ENABLE ROW LEVEL SECURITY;
+CREATE POLICY verified_purchase_records_owner_or_system ON verified_purchase_records
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+`verified_purchase_records`'s policy is a plain owner-or-system predicate, no role branch — `POST /reviews`'s gate check is always the review author reading their own eligibility row, never a moderator. A row whose `user_id` is still `NULL` (before `OrderCreated` is consumed) is filtered out for any `'user'`-kind session regardless of who's asking, which is exactly the existing "no matching delivered order found yet" rejection outcome the gate check already produces at the application layer — RLS reinforces, rather than changes, that behavior.
+
+**Not covered by this policy (no per-row end-user ownership concept):**
+
+- `product_ratings`, `product_rating_ledger` — both keyed on `sku` (or `(order_id, sku)`), never `user_id`; a rating aggregate belongs to a product, not an end user, the same "a `user_id`-shaped policy would not even apply" carve-out BRD §24.1.4's own text uses for Payment's `payment_intents`. Both tables are, in addition, written exclusively by the internal `system:review-rating-projector` consumer (ddd-model.md) — no end-user- or moderator-facing request path ever reaches either directly.
+- `review_outbox` — an internal Outbox relay table, written by the same transaction as a `reviews` mutation and read exclusively by the Outbox poller; no end-user-facing request path queries it directly, the same carve-out `kart-identity-service/database-design.md` and `kart-wishlist-service/database-design.md` draw for their own Outbox tables.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. Review is the exact worked example BRD §24.1.5 itself names for this column, so the classification below grounds directly in that table rather than deriving one from scratch.
+
+| Column | Full Value Visible To | Masked/Omitted For | Masking Rule |
+|---|---|---|---|
+| `reviews.user_id` (author identity) | Author (own row), Support Agent/Admin (moderation) | Any other Customer (public read) | BRD §24.1.5's own worked example, verbatim for this service: public review reads return a display name only, never the raw `user_id`; moderation-facing reads resolve the true author for abuse/moderation handling. Enforced at the `review_read_model` (MongoDB) projection and `GET /reviews?sku=...`'s response DTO — the projection never carries the raw `user_id` into a publicly-servable field in the first place (see below), rather than carrying it and relying on serialization to strip it at read time. |
+| `reviews.idempotency_key` | No one, via any API response, ever | Every role, including the author | A client-request-correlation token, not domain content — never included in any response DTO; the only legitimate reader is the creation-retry-dedup check itself (database-design.md's Idempotency-Key Replay Window) |
+
+**Why this list and no more:** `reviews.rating`, `.body_text`, `.status`, `.first_published_at`, `.created_at`/`.last_edited_at`, and the other §24.3 audit columns are not classified as sensitive — review content and moderation state are, by their nature, the platform-facing content this service exists to publish, not PII. `order_id`/`sku` are opaque cross-service references (ddd-model.md's ACL notes), not personal data about the reviewer. `product_ratings`/`product_rating_ledger`/`verified_purchase_records` carry no column that identifies a person beyond the `user_id`/opaque-reference columns already covered by the RLS policy above (only the record's own owner or an internal system process ever reaches those rows at all).
+
+**Enforcement point:** primarily the `review_read_model` MongoDB projection and `GET /reviews?sku=...`'s response DTO (api-contract.yaml), per §24.1.5's stated primary control — the projection is built to resolve `user_id` to a display name (a denormalized lookup against `kart-user-service`'s own public profile data, the same cross-service-reference pattern this service already uses for `sku`/`order_id`) before the document is ever written, so a public read never has the raw `user_id` to leak in the first place; the moderation-facing read path (`PATCH /reviews/{id}/moderate`'s own query) reads directly from the PostgreSQL `reviews` row, which does carry the true `user_id`, gated by the RLS policy above. Secondarily, for any direct database connection bypassing this service's own API entirely (an analytics/BI read-replica, ops tooling), native `GRANT SELECT (col1, ...) ON reviews TO <db_role>` restricted to exclude `user_id`/`idempotency_key` for any database role other than this service's own application service role.
 
 ## Read Model (MongoDB) — `Review` only
 
@@ -177,7 +246,7 @@ COMMIT;
   "_id": "<reviewId>",
   "orderId": "...",
   "sku": "...",
-  "userId": "...",
+  "authorDisplayName": "...",
   "rating": 5,
   "bodyText": "...",
   "firstPublishedAt": "2026-07-20T10:00:00Z",
@@ -186,6 +255,8 @@ COMMIT;
 ```
 
 Projected by a consumer reading `review_outbox`'s published rows and upserting into a single `review_read_model` collection, keyed by `reviewId` — rebuildable from the PostgreSQL write side at any time (the core CQRS safety property, BRD §7). Write behavior per event type: `ReviewSubmitted` inserts the document (this is, by construction, always the first time this `reviewId` becomes visible — ddd-model.md's `firstPublishedAt` rule); `ReviewUpdated` updates `rating`/`bodyText`/`lastEditedAt` in place; `ReviewUnpublished` **deletes** the document outright rather than soft-flagging it — `GET /reviews?sku=...` (requirement-spec §5: "excludes soft-retracted and queued-for-moderation reviews") must never surface unpublished content, and the read model carries no audit responsibility of its own (that lives in `reviews`/`review_outbox` on the write side, which are never pruned).
+
+**Column-level security note (BRD §24.1.5 — see the "Sensitive / PII Column Classification" subsection below for the full rule):** this document deliberately projects `authorDisplayName`, never the raw `userId`, from `reviews.user_id` — the projector resolves the display name via a denormalized lookup against `kart-user-service`'s own public profile data at write time, the same cross-service-reference pattern already used for `sku`/`order_id`. This is the platform's own worked masking example (BRD §24.1.5) applied directly: a public `GET /reviews?sku=...` reader never has the raw author identity to leak in the first place, since it was never projected here at all; the moderation-facing path (`PATCH /reviews/{id}/moderate`) resolves the true author by reading the PostgreSQL `reviews` row directly instead, where the RLS policy (below) already restricts access to the author or a Support Agent/Admin.
 
 ```
 db.review_read_model.createIndex({ sku: 1, firstPublishedAt: -1 })

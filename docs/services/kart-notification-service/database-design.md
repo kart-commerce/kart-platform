@@ -39,7 +39,9 @@ CREATE TABLE notification_attempts (
     attempt_count         INTEGER NOT NULL DEFAULT 0,
     suppressed_reason     TEXT NULL,                -- populated only when status = 'Suppressed'
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_attempt_at        TIMESTAMPTZ NULL,
+    last_attempt_at        TIMESTAMPTZ NULL,         -- this table's updated_at under BRD §24.3, in the domain's own vocabulary; bumped by the status-guard trigger below
+    created_by             TEXT NOT NULL DEFAULT 'system:notification-send-pipeline',  -- BRD §24.3 -- no human/API caller ever writes this table (ddd-model.md's audit-actor invariant); always this well-known system principal
+    updated_by             TEXT NOT NULL DEFAULT 'system:notification-send-pipeline',
 
     -- NotificationAttemptKey (ddd-model.md) — this constraint IS the idempotency mechanism
     -- (insert-first / ON CONFLICT semantics, Modeling Decision #2), not a pre-check against a
@@ -125,7 +127,10 @@ CREATE INDEX idx_notification_attempts_failed ON notification_attempts (created_
 CREATE TABLE order_user_index (
     order_id    UUID PRIMARY KEY,
     user_id     UUID NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3 uniformity; no update path exists in v1 (a row is seeded once via ON CONFLICT DO NOTHING, never edited thereafter)
+    created_by  TEXT NOT NULL DEFAULT 'system:notification-order-user-index-consumer',  -- BRD §24.3 -- seeded exclusively by consuming OrderCreated
+    updated_by  TEXT NOT NULL DEFAULT 'system:notification-order-user-index-consumer'
 );
 
 -- Seeded solely by consuming ShipmentDispatched (orderId, trackingId already both
@@ -135,7 +140,10 @@ CREATE TABLE order_user_index (
 CREATE TABLE tracking_order_index (
     tracking_id  TEXT PRIMARY KEY,
     order_id     UUID NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3 uniformity; no update path exists in v1, same reasoning as order_user_index
+    created_by   TEXT NOT NULL DEFAULT 'system:notification-tracking-order-index-consumer',  -- BRD §24.3 -- seeded exclusively by consuming ShipmentDispatched
+    updated_by   TEXT NOT NULL DEFAULT 'system:notification-tracking-order-index-consumer'
 );
 
 -- Neither table is partitioned: both are bounded by distinct order count, not raw
@@ -155,7 +163,10 @@ CREATE TABLE notification_preferences (
     user_id          UUID PRIMARY KEY,          -- reference only, owned by kart-identity-service
     opt_out_matrix   JSONB NOT NULL DEFAULT '{}'::jsonb,  -- OptOutMatrix: {channel -> {category -> optedOut: bool}}
     app_installed    BOOLEAN NOT NULL DEFAULT false,      -- AppInstalled — gates Push as a candidate channel
-    last_updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3; added alongside the existing last_updated_at column (this table's own updated_at, in its domain vocabulary) for platform-wide uniformity
+    last_updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by       TEXT NOT NULL DEFAULT 'system:notification-preference-sync-consumer',  -- BRD §24.3 -- the sole creation/update trigger is consuming UserNotificationPreferenceUpdated
+    updated_by       TEXT NOT NULL DEFAULT 'system:notification-preference-sync-consumer'
 
     -- No separate idempotency ledger, unlike notification_attempts (Modeling Decision #9): a
     -- full-map replace upsert (Modeling Decision #7) is naturally idempotent under
@@ -250,7 +261,8 @@ VALUES ($user_id, $opt_out_matrix, $app_installed, now())
 ON CONFLICT (user_id) DO UPDATE
 SET opt_out_matrix = EXCLUDED.opt_out_matrix,
     app_installed  = EXCLUDED.app_installed,
-    last_updated_at = EXCLUDED.last_updated_at;
+    last_updated_at = EXCLUDED.last_updated_at,
+    updated_by = 'system:notification-preference-sync-consumer';  -- BRD §24.3; created_at/created_by keep their original insert-time DEFAULT values, unmodified by an update
 ```
 
 ## No Transactional Outbox — `NotificationSent` Publish Is Direct, Not Transactional
@@ -282,6 +294,45 @@ A time-range partitioning scheme (the more obvious first instinct for a time-ord
 | `tracking_order_index` `PRIMARY KEY (tracking_id)` | `orderId` resolution for `DeliveryStatusUpdated`, chained into `order_user_index` | Direct point lookup by the only key this table is ever queried on (ADR-0020) |
 
 No index is added for JSONB containment queries against `opt_out_matrix` (e.g. a GIN index) — the only query pattern this column serves is "fetch the one row for this `user_id`, then inspect the map in application code" (the combined query above), never a `WHERE opt_out_matrix @> ...` scan across many users' rows. Adding one would be exactly the kind of speculative index this stage's own standard (`database-design-agent.md`: "no speculative indexes") warns against.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Notification's write model is 100% PostgreSQL with no MongoDB/Redis read side (see the introductory section above), so native RLS is the mechanism for every table with a per-row end-user ownership concept — subject to the caveat below, unique to this service among the ones classified so far: **there is currently no request-scoped session that ever authenticates as an end user at all**, because Notification exposes no public or internal API (architecture.md's Boundary Rationale; requirement-spec.md's §24.1.2 cross-reference).
+
+**Session-scoped principal setting.** Same ambient mechanism already established platform-wide (see `kart-identity-service/database-design.md`'s precedent, generic plumbing owned by the shared `kart-shared` `ICurrentPrincipalAccessor`, not reimplemented here): immediately after acquiring a pooled connection and before any query runs, this service issues `SET LOCAL app.current_principal = <id>` and `SET LOCAL app.current_principal_kind = <'user'|'service'|'system'>`. Because every write and every read against this schema today originates from an internal event consumer (the send pipeline, the `userId`-resolution seeders, the preference-sync consumer — ddd-model.md's audit-actor invariants), `app.current_principal_kind` is always set to `system` in this service's current implementation — there is no code path that ever sets it to `user`, because no end-user-facing request exists to originate one.
+
+**Policy shape.** `notification_attempts` and `notification_preferences` both carry a genuine per-row `user_id` ownership column, so both get an owner-or-system policy, applied now as defense-in-depth even though the ownership branch is not exercised by any code path that exists today:
+
+```sql
+ALTER TABLE notification_attempts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notification_attempts_owner_or_system ON notification_attempts
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+ALTER TABLE notification_preferences ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notification_preferences_owner_or_system ON notification_preferences
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+**Why bother, given no `user`-kind session exists yet:** `idx_notification_attempts_user_audit` (Indexing Rationale, above) already anticipates a future ops/support "what has this user received" query surface — the same kind of internal-tooling read `kart-shipping-service/database-design.md` flags as a *possible* future addition for its own Postgres-only write side. Enabling the policy now, while the only session kind in existence is `system` (which the policy already always admits), costs nothing and means that if/when such a query surface — or any future user-facing endpoint — is added, it inherits a correct row-level guarantee automatically rather than requiring a retrofit migration the way ADR-0020's own `userId`-resolution gap had to be closed after the fact for a different reason.
+
+**Not covered by this policy (no end-user-facing access path at all):**
+
+- `order_user_index`, `tracking_order_index` — both are internal lookup projections (ADR-0020) read exclusively by this service's own `userId`-resolution step inside the send pipeline, never by any end-user- or ops-facing query; `order_user_index` does carry a `user_id` column, but nothing outside this service's own internal resolution code ever queries it directly by that column, the same "no end-user-facing endpoint reads or writes it" carve-out `kart-identity-service/database-design.md` applies to its own `idp_group_role_mappings`. `tracking_order_index` has no `user_id`-shaped column at all (keyed on `tracking_id -> order_id`), the same "a `user_id`-shaped policy would not even apply" carve-out BRD §24.1.4's own text uses for Payment's `payment_intents`.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. That question presupposes some caller reaches the row via an API response in the first place; Notification has none (§24.1.2 above), so there is no response-serialization surface for a masking rule to apply to. Independent of that, this service's own already-approved "GDPR Erasure (ADR-0016)" analysis below reaches the exact conclusion §24.1.5 would need to classify columns against:
+
+- **No sensitive/PII column exists in this schema.** `user_id` (on `notification_attempts`, `notification_preferences`, and `order_user_index`) is held purely as an **opaque referential key** owned by `kart-identity-service` — never resolved to a name, email address, or phone number anywhere in this service's own tables. Channel-specific delivery addresses (the actual PII a masking rule would otherwise need to gate) are resolved at send time via the channel adapter's own lookup against Identity/User profile data and are never persisted to this schema at all (see the GDPR Erasure analysis below). This is the identical "no unmasked sensitive data exists to protect in the first place" reasoning BRD §24.1.5's own Payment Service example uses for PCI columns — Notification's genuinely dangerous data (a raw delivery address) is already never-written here, a narrower and stronger control than masking a column that does exist.
+- `notification_attempts.triggering_event_type`, `.category`, `.status`, `.suppressed_reason`, `notification_preferences.opt_out_matrix`, `.app_installed` — operational/business-state fields, not personal data about the referenced user beyond the opaque `user_id` reference itself already addressed above.
+
+**Enforcement point:** not applicable at the primary API response-serialization layer (BRD §24.1.5) since no API response exists to shape (§24.1.2 above); the secondary database-column-privilege control is likewise not needed today for the same reason no sensitive column exists to restrict — revisit only if a future schema change (e.g., persisting a raw delivery address for debugging, flagged as the trigger condition in the GDPR Erasure analysis below) introduces one.
 
 ## GDPR Erasure (ADR-0016) — Checked, One Discrepancy Flagged (Non-Blocking)
 

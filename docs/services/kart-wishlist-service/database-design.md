@@ -40,7 +40,21 @@ CREATE TABLE wishlist_entries (
                                 -- ddd-model.md AlertCooldownState: backs the 24-hour-per-pair
                                 -- cooldown (requirement-spec §4, §6 item 3). NULL = never alerted.
     added_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                -- this table's created_at under BRD §24.3, in the domain's own
+                                -- "added" vocabulary -- not duplicated as a second created_at column.
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                -- BRD §24.3; bumped on every reference_price reset, status
+                                -- transition, or last_alerted_at write.
+    created_by          TEXT NOT NULL,
+                                -- BRD §24.3 -- the owning userId; every insert is a client-facing
+                                -- add-to-wishlist write, so this table has no system-only insert path.
+    updated_by          TEXT NOT NULL
+                                -- BRD §24.3 -- the owning userId for a client-facing write (none
+                                -- exists today beyond add/remove, but carried for uniformity), or a
+                                -- well-known system:* principal for the ProductDiscontinued-consumer
+                                -- / reconciliation-job stale transition and the alert-triggered
+                                -- reference_price/last_alerted_at reset (see ddd-model.md's
+                                -- audit-actor invariant for the exact system:* ids).
 
     CONSTRAINT uq_wishlist_entries_user_sku UNIQUE (user_id, sku)
                                 -- ddd-model.md invariant: a (userId, sku) pair maps to at most
@@ -78,6 +92,19 @@ CREATE TABLE wishlist_alert_dedup (
     sku                 TEXT NOT NULL,
     price_observed      NUMERIC(12, 2) NOT NULL,
     alerted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                -- this table's created_at under BRD §24.3, in the domain's own
+                                -- "alerted" vocabulary.
+    created_by          TEXT NOT NULL DEFAULT 'system:wishlist-price-evaluator',
+                                -- BRD §24.3 -- this row is always written by the ProductPriceChanged
+                                -- qualify-time evaluation process, never a client-facing request;
+                                -- there is no human/API caller to attribute the insert to.
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                -- BRD §24.3 uniformity -- no update path exists in v1 (a dedup row
+                                -- is inserted once, never edited), carried for platform-wide
+                                -- consistency and to cover a future correction path without a schema
+                                -- change.
+    updated_by          TEXT NOT NULL DEFAULT 'system:wishlist-price-evaluator',
+                                -- mirrors created_by until an update path exists
 
     CONSTRAINT uq_wishlist_alert_dedup UNIQUE (user_id, sku, price_observed)
                                 -- the actual idempotency guard: inserting the same
@@ -106,7 +133,18 @@ CREATE TABLE wishlist_outbox_events (
                                 -- (edge-cases.md "Price Rebound During the Batching/Digest
                                 -- Window"), not necessarily the value captured at qualify-time.
     occurred_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at        TIMESTAMPTZ NULL
+                                -- this table's created_at under BRD §24.3, in the domain's own
+                                -- event vocabulary.
+    published_at        TIMESTAMPTZ NULL,
+    created_by          TEXT NOT NULL DEFAULT 'system:wishlist-digest-flush',
+                                -- BRD §24.3 -- the digest-flush sweep is the only process that ever
+                                -- writes a row here (design-decisions.md's batching decision); there
+                                -- is no client-facing insert path.
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                -- BRD §24.3; bumped when published_at is set.
+    updated_by          TEXT NOT NULL DEFAULT 'system:wishlist-outbox-poller'
+                                -- BRD §24.3 -- the Outbox poller is the only process that ever
+                                -- updates a row after insert.
 );
 
 -- The Outbox relay's own scan: "find everything not yet published, oldest first" — same
@@ -120,6 +158,36 @@ CREATE INDEX idx_wishlist_outbox_unpublished
 ### GDPR Erasure — `UserDataErased` Write Path (ADR-0016)
 
 Per `design-decisions.md`'s "Erasure Mechanism for `UserDataErased`" decision and `ddd-model.md`'s matching invariant: on consuming `UserDataErased` for a `user_id`, one handler transaction runs three deletes — `DELETE FROM wishlist_entries WHERE user_id = ?`, `DELETE FROM wishlist_alert_dedup WHERE user_id = ?`, and the Redis accumulator purge (below) — all hard deletes, no tombstone column, since none of this data is BRD-required retained history (ADR-0016 item 3). `idx_wishlist_entries_user_status` and `idx_wishlist_alert_dedup_user_sku` back both deletes with an index scan rather than a table scan. A redelivered `UserDataErased` for an already-erased `user_id` deletes zero rows in both tables — a no-op, not an error, satisfying the idempotent-consumer invariant.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Wishlist's write model is PostgreSQL (see above), and `wishlist_entries`/`wishlist_alert_dedup` both have a genuine per-row `user_id` ownership concept, so native RLS is the mechanism for each.
+
+**Session-scoped principal setting.** Same ambient mechanism already established platform-wide (see `kart-identity-service/database-design.md`'s precedent, generic plumbing owned by the shared `kart-shared` `ICurrentPrincipalAccessor`, not reimplemented here): immediately after acquiring a pooled connection and before any query runs, this service issues `SET LOCAL app.current_principal = <id>` and `SET LOCAL app.current_principal_kind = <'user'|'service'|'system'>`, resolved server-side from the validated JWT context or the internal consumer/job context — never a client-suppliable value. `app.current_principal` is the caller's own `user_id` for client-facing `/wishlist` add/remove requests, or a well-known `system:*` id for the `ProductPriceChanged`/`ProductDiscontinued` consumers, the reconciliation job, the digest-flush process, and the `UserDataErased` consumer. This is the same resolved-principal value the shared `kart-shared` `created_by`/`updated_by` interceptor (§24.3, above) stamps onto every mutation — RLS and audit-column injection read one ambient current-principal accessor from that same package, not two independently-maintained notions of "who is acting."
+
+**Policy shape.** Both tables' policies grant access when the row's `user_id` matches `app.current_principal`, **or** when `app.current_principal_kind` is `service`/`system`. The latter branch is not a blanket bypass: per requirement-spec.md's §24.1.2 cross-reference, every system-initiated write here (stale-marking, dedup-insert, erasure-delete) has no client-facing entry point at all — these are internal consumer/job processes no external caller can reach — so RLS's marginal, additive protection is specifically against the failure mode §24.1.4 itself names (a user-facing code path that forgets its own `WHERE user_id = ...` clause), which stays fully blocked whenever `app.current_principal_kind = 'user'`.
+
+```sql
+-- wishlist_entries
+ALTER TABLE wishlist_entries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY wishlist_entries_owner_or_system ON wishlist_entries
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- wishlist_alert_dedup
+ALTER TABLE wishlist_alert_dedup ENABLE ROW LEVEL SECURITY;
+CREATE POLICY wishlist_alert_dedup_owner_or_system ON wishlist_alert_dedup
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+**Not covered by this policy (no per-row end-user ownership concept reachable by a request path):**
+
+- `wishlist_outbox_events` — despite carrying a `user_id` column for payload provenance, this table is an internal Outbox relay written exclusively by the digest-flush process and read exclusively by the Outbox poller (both `system:*`-attributed, above); no end-user- or admin-facing request path ever queries it directly, the same carve-out `kart-identity-service/database-design.md` draws for its own `outbox_events` table. Adding a redundant RLS policy on a table reached by exactly one, fully-trusted internal code path would be defense-in-depth against a code path that doesn't exist.
 
 ## Read Model (MongoDB)
 
@@ -147,6 +215,17 @@ Not a CQRS read model — a publish-cadence buffer, per `design-decisions.md`'s 
 - A scheduled sweep flushes any key past its 15-minute rolling-quiet mark (or the 60-minute hard cap, whichever comes first) — writing one row into `wishlist_outbox_events` per user per flush, re-checking each entry's current price immediately before doing so (edge-cases.md's rebound decision) and dropping any item that has rebounded to/above its original baseline.
 - On `UserDataErased`, this key is deleted synchronously in the same handler as the PostgreSQL deletes above (`design-decisions.md`'s erasure decision; `edge-cases.md`'s "Residual Wishlist State" decision) — never left to expire on its own TTL, since ADR-0016 item 7 treats a delayed erasure as a compliance failure, not a tolerable staleness window.
 - Redis availability is a **latency/timeliness**, not a correctness, dependency for the alert feature: if Redis is down, the qualify-time check simply cannot accumulate a pending trigger for that window, at worst delaying (not corrupting or duplicating) an alert — `wishlist_entries`/`wishlist_alert_dedup` in PostgreSQL remain the durable source of truth for whether a `(userId, sku)` pair has already qualified and/or already alerted.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. Wishlist has no sensitive/PII column of its own to classify:
+
+- `wishlist_entries.sku`, `.reference_price`, `.status`, `.last_alerted_at`, `wishlist_alert_dedup.price_observed` — plain catalog/pricing/state facts, not PII, and already scoped to the row's owner by the RLS policy above (no other principal reaches the row at all, so there is no *further* column-masking question within it).
+- `user_id` (both tables) — an opaque foreign-key reference into Identity/User Service's own identity (`ddd-model.md`'s Anti-Corruption Layer note), never resolved to a name, email, or phone within this service. Wishlist never returns another user's `user_id` in any response — the RLS policy above already ensures the only caller who can reach a row at all is its own owner — so there is no masking rule to define, the same "no unmasked sensitive data exists to protect in the first place" reasoning BRD §24.1.5's own Payment Service example uses for PCI columns.
+
+**Why none:** unlike User Service (`addresses.line1`/`line2`/`phone`) or Identity (credential/token material), nothing in Wishlist's own domain data is directly identifying or credential-shaped — the service exists to track `(userId, sku)` pairs and price thresholds, not personal contact or account-security data. No `GRANT SELECT (col1, ...)` database-role restriction is needed for the same reason.
+
+**Enforcement point:** not applicable at the primary API response-serialization layer (BRD §24.1.5) since there is no sensitive column to mask or omit; the secondary database-column-privilege control is likewise not needed, consistent with the reasoning above.
 
 ## Indexing Rationale
 

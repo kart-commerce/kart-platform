@@ -24,6 +24,8 @@ CREATE TABLE shipments (
     failure_reason  TEXT NULL,              -- FailureReason value object; set exactly once, only on transition to Failed
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by      TEXT NOT NULL DEFAULT 'system:shipping-order-confirmed-consumer',  -- BRD §24.3 -- the sole creation path today is consuming OrderConfirmed (ddd-model.md's audit-actor invariant); would instead be an operator's own principal id if the internal /shipments endpoint's manual-creation path is ever built
+    updated_by      TEXT NOT NULL DEFAULT 'system:shipping-carrier-call-worker',       -- BRD §24.3 -- the carrier-call worker is the only process that resolves Pending -> {Dispatched, Failed}
 
     UNIQUE (order_id),   -- Uniqueness invariant: at most one Shipment per Order (ddd-model.md;
                          -- requirement-spec §4 Domain Invariant #1). This is the DB-level half of
@@ -95,11 +97,14 @@ CREATE TABLE shipment_outbox (
                                        -- {orderId, carrier, trackingId}; ShipmentCreationFailed:
                                        -- {orderId, reason} — exactly BRD §10's stated payloads
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    processed_at  TIMESTAMPTZ NULL    -- set by the carrier-call worker once it has attempted and
+    processed_at  TIMESTAMPTZ NULL,   -- set by the carrier-call worker once it has attempted and
                                        -- resolved a CarrierCallRequested row (successfully or by
                                        -- exhaustion); set by the event-relay poller once it has
                                        -- successfully published a ShipmentDispatched/
                                        -- ShipmentCreationFailed row to RabbitMQ
+    created_by    TEXT NOT NULL,      -- BRD §24.3 -- 'system:shipping-order-confirmed-consumer' for a CarrierCallRequested row, 'system:shipping-carrier-call-worker' for a ShipmentDispatched/ShipmentCreationFailed row -- whichever process performed the insert (see Write Mechanics below)
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- BRD §24.3; bumped when processed_at is set
+    updated_by    TEXT NOT NULL       -- BRD §24.3 -- 'system:shipping-carrier-call-worker' when it marks its own CarrierCallRequested marker processed, 'system:shipping-outbox-relay-poller' when the event-relay poller publishes a domain-event row -- whichever process sets processed_at
 );
 
 CREATE INDEX idx_shipment_outbox_shipment ON shipment_outbox (shipment_id);
@@ -128,9 +133,10 @@ BEGIN;
 -- never reaching the INSERTs below, never calling the carrier.
 SELECT 1 FROM shipments WHERE order_id = $order_id;
 -- (no row) ->
-INSERT INTO shipments (id, order_id) VALUES ($shipment_id, $order_id);  -- status defaults to 'Pending'
-INSERT INTO shipment_outbox (id, shipment_id, message_type, payload)
-VALUES ($marker_id, $shipment_id, 'CarrierCallRequested', jsonb_build_object('orderId', $order_id, 'address', $address));
+INSERT INTO shipments (id, order_id) VALUES ($shipment_id, $order_id);  -- status defaults to 'Pending'; created_by/updated_by default to 'system:shipping-order-confirmed-consumer' (BRD §24.3)
+INSERT INTO shipment_outbox (id, shipment_id, message_type, payload, created_by, updated_by)
+VALUES ($marker_id, $shipment_id, 'CarrierCallRequested', jsonb_build_object('orderId', $order_id, 'address', $address),
+        'system:shipping-order-confirmed-consumer', 'system:shipping-order-confirmed-consumer');  -- BRD §24.3
 COMMIT;
 ```
 
@@ -140,17 +146,19 @@ The `UNIQUE (order_id)` constraint is the backstop against a race between the ex
 
 ```sql
 BEGIN;
-UPDATE shipments SET status = 'Dispatched', carrier = $carrier, tracking_id = $tracking_id
+UPDATE shipments SET status = 'Dispatched', carrier = $carrier, tracking_id = $tracking_id,
+       updated_by = 'system:shipping-carrier-call-worker'  -- BRD §24.3
 WHERE id = $shipment_id AND status = 'Pending';
-INSERT INTO shipment_outbox (id, shipment_id, message_type, payload)
-VALUES ($event_id, $shipment_id, 'ShipmentDispatched', jsonb_build_object('orderId', $order_id, 'carrier', $carrier, 'trackingId', $tracking_id));
-UPDATE shipment_outbox SET processed_at = now() WHERE id = $marker_id;
+INSERT INTO shipment_outbox (id, shipment_id, message_type, payload, created_by, updated_by)
+VALUES ($event_id, $shipment_id, 'ShipmentDispatched', jsonb_build_object('orderId', $order_id, 'carrier', $carrier, 'trackingId', $tracking_id),
+        'system:shipping-carrier-call-worker', 'system:shipping-carrier-call-worker');  -- BRD §24.3
+UPDATE shipment_outbox SET processed_at = now(), updated_by = 'system:shipping-carrier-call-worker' WHERE id = $marker_id;  -- BRD §24.3
 COMMIT;
 ```
 
 (or the symmetric `Failed` / `ShipmentCreationFailed` path once every configured carrier option is exhausted, ADR-0015). If `UPDATE shipments ... WHERE status = 'Pending'` affects 0 rows, this marker is redundant against an already-terminal row (a duplicate/redelivered resolution) — `trg_shipments_status_guard` would reject it anyway; the worker simply marks the outbox row processed and does nothing else, matching ddd-model.md's "no-op, never reapplied" invariant.
 
-**3. Event-relay poller** (standard Outbox relay, BRD §11): polls `idx_shipment_outbox_pending_publish`, publishes each row's `payload` to `ecommerce.events` under the appropriate routing key, sets `processed_at` on success. Identical shape to `kart-order-service`'s and `kart-inventory-service`'s own relays (design-decisions.md).
+**3. Event-relay poller** (standard Outbox relay, BRD §11): polls `idx_shipment_outbox_pending_publish`, publishes each row's `payload` to `ecommerce.events` under the appropriate routing key, sets `processed_at` (and, per BRD §24.3, `updated_by = 'system:shipping-outbox-relay-poller'`) on success. Identical shape to `kart-order-service`'s and `kart-inventory-service`'s own relays (design-decisions.md).
 
 ## Where Does the Destination Address Live? — Filling a Gap `ddd-model.md` Leaves Implicit
 
@@ -166,6 +174,23 @@ COMMIT;
 `shipments` itself holds no directly-identifying PII once the design above is followed — same conclusion `kart-payment-service/database-design.md` reaches for `payment_intents`, and for the same reason (only opaque/referential fields persist indefinitely: `order_id`, `carrier`, `tracking_id`). ADR-0016 does not name `kart-shipping-service` as a service needing to consume `UserDataErased`, and on this schema there is no `user_id` column to key a redaction against even if it did.
 
 **Flagged, not fixed here:** the destination address — genuinely PII — does transit through `shipment_outbox.payload` (the `CarrierCallRequested` row, per above) for as long as that row remains unpruned. `UserDataErased`'s payload (`userId`, `erasedAt`, ADR-0016) has no way to key against this table at all: `OrderConfirmed`'s stated payload (`orderId, address`, BRD §10) never carries `userId` through to Shipping, and `shipment_outbox` is keyed on `shipment_id`/`order_id` only. Two independent mitigations are already in place without needing Shipping to become a `UserDataErased` consumer: (1) the row is prunable/short-lived per the retention recommendation above, bounding exposure to a small operational window rather than indefinite retention; (2) `shipments`, the permanent record, never stores the address at all. Whether that bounded window is itself compliant enough, or whether Order's `OrderConfirmed` payload should instead carry `userId` so Shipping (and any future PII-bearing consumer) could key a proper redaction handler, is a cross-service contract question belonging to `kart-order-service`'s own event-contract ownership — recorded here explicitly so it isn't lost, the same way architecture.md already flags the `ShipmentCreationFailed`/Order reconciliation gap as "expected, deferred... not a gap in Shipping's docs to fix."
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security — including deciding that native RLS does not apply where no per-row end-user ownership concept exists. Neither `shipments` nor `shipment_outbox` gets an `ENABLE ROW LEVEL SECURITY` policy, and this is a considered conclusion, not an oversight:
+
+- **`shipments` carries no `user_id`-shaped column at all** — it is keyed purely on `order_id` (ddd-model.md's `OrderId` value object), an opaque cross-service reference, exactly the shape BRD §24.1.4's own text names directly as its Payment carve-out example: "Payment's `payment_intents`... never stores `user_id` directly — it keys only on the opaque `order_id`, so a `user_id`-shaped row-level policy would not even apply." The same reasoning applies here verbatim, for the same reason (a per-row ownership concept requires an ownership column to key a policy on, and none exists).
+- **`shipment_outbox` inherits the same carve-out** — it is keyed on `shipment_id`, one level further removed from any end-user identity than `shipments` itself, and (per the GDPR Erasure analysis above) the one PII-bearing field it ever carries (the destination `address`, transiently, inside `CarrierCallRequested.payload`) has no `user_id` to scope a policy against even if one were wanted.
+- **What actually gates access instead:** per requirement-spec.md's §24.1.2 cross-reference, the only conceivable caller-facing surface onto either table (the internal/administrative `/shipments` endpoint) is gated by coarse role (Support Agent/Admin) at the application layer, not by row ownership at the database layer — because there is no owning end user to check a row against in the first place. This is the correct, not a missing, control for a resource that is inherently back-office/operational rather than customer-owned, the identical shape BRD §24.1.4 already anticipates for Payment's own `payment_intents`.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. Shipping's permanent record has nothing to classify, and its one transient PII-bearing field is already handled by not persisting it at all rather than by masking:
+
+- **`shipments`** — `order_id` (opaque reference), `carrier` (a company name, not personal data), `tracking_id`, `failure_reason`, `status`, and the §24.3 audit columns carry no PII. There is no column here for any coarse role to see a full, masked, or omitted version of beyond what's already stated — the same "no unmasked sensitive data exists to protect in the first place" reasoning BRD §24.1.5's own Payment Service example uses for PCI columns, reached here for the identical structural reason (the sensitive value, the destination address, was deliberately never given a column on this table — see "Where Does the Destination Address Live?" above).
+- **`shipment_outbox.payload`** — does transiently carry the destination `address` (genuinely PII) inside a `CarrierCallRequested` row's JSONB blob, for as long as that row remains unpruned (per the GDPR Erasure analysis above). This is not classified as a maskable column in the BRD §24.1.5 sense — masking presupposes an API response surface serving different coarse roles different views of the same row, and nothing in this schema ever serves `shipment_outbox.payload` back through any API response at all (it is read only by the carrier-call worker and the event-relay poller, both internal processes, never by a caller). The control that actually applies is retention/exposure-window bounding (the pruning recommendation above), not response-layer masking.
+
+**Enforcement point:** not applicable at the primary API response-serialization layer for either table — `shipments` has no sensitive column to shape a response around, and `shipment_outbox` has no API response surface at all. Should the internal/admin `/shipments` endpoint (if built) ever expose a raw `shipment_outbox` row (e.g., an ops debugging view), that would be the trigger to add an explicit masking/omission rule for `payload.address` at that point — not a gap in this schema today, consistent with the GDPR Erasure section's own "flagged, not fixed here" posture.
 
 ## Partitioning/Sharding
 

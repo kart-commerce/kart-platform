@@ -30,6 +30,16 @@ CREATE TABLE payment_intents (
     chargeback_received_at TIMESTAMPTZ NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by          TEXT NOT NULL,
+                        -- BRD §24.3 — 'system:order-saga-payment-consumer' for the OrderCreated-
+                        -- triggered charge (the near-universal case; charge is not a direct
+                        -- customer-facing call, requirement-spec §2)
+    updated_by          TEXT NOT NULL,
+                        -- BRD §24.3 — the Support Agent principal id for a manual refund write
+                        -- (ddd-model.md's CanRead/CanWrite/CanDelete invariant), 'system:order-
+                        -- saga-payment-consumer' for Order's Saga-compensation refund call, or
+                        -- 'system:payment-gateway-webhook-consumer' for a webhook-driven
+                        -- completed/failed/disputed transition
     UNIQUE (order_id)   -- exactly one PaymentIntent per order (requirement-spec: charge is idempotent per order;
                         -- a retried OrderCreated delivery resolves via idempotency_keys before ever reaching a second insert here)
 );
@@ -65,7 +75,17 @@ CREATE TABLE refunds (
     amount              NUMERIC(12,2) NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending'
                             CHECK (status IN ('pending', 'succeeded', 'failed')),
-    requested_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    requested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        -- this table's created_at under BRD §24.3, in the domain's own refund
+                        -- vocabulary
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped when status resolves to succeeded/failed
+    created_by          TEXT NOT NULL,
+                        -- BRD §24.3 — the Support Agent principal id for a manual refund, or
+                        -- 'system:order-saga-payment-consumer' for Order's Saga-compensation
+                        -- refund call (ddd-model.md's CanRead/CanWrite/CanDelete invariant)
+    updated_by          TEXT NOT NULL DEFAULT 'system:payment-gateway-webhook-consumer'
+                        -- BRD §24.3 — the webhook ingestion path is the only process that ever
+                        -- resolves a refund's status after its initial insert
 );
 
 CREATE INDEX idx_refunds_intent_succeeded ON refunds (payment_intent_id)
@@ -79,6 +99,15 @@ CREATE TABLE idempotency_keys (
     stored_response     JSONB NULL,             -- set once the gateway call / refund write resolves
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at          TIMESTAMPTZ NOT NULL,   -- created_at + 24h (requirement-spec's stated TTL default)
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped when stored_response is set
+    created_by          TEXT NOT NULL,
+                        -- BRD §24.3 — the same acting principal reserving this key: a Support
+                        -- Agent's principal id (refund endpoint) or 'system:order-saga-payment-
+                        -- consumer' (charge endpoint, whether client- or OrderCreated-triggered)
+    updated_by          TEXT NOT NULL,
+                        -- BRD §24.3 — same value as created_by; this record has exactly one
+                        -- writer across its reserve-then-confirm lifecycle (ddd-model.md's
+                        -- Cross-Aggregate Interaction), never a second, different actor
     PRIMARY KEY (idempotency_key, endpoint)     -- the (key, endpoint) scoping requirement-spec Open Question #1 resolved
 );
 
@@ -92,7 +121,15 @@ CREATE TABLE gateway_webhook_events (
     event_type          TEXT NOT NULL,          -- GatewayEventType value object (adapter-specific enumeration)
     applied_transition  TEXT NULL,              -- which PaymentIntentStatus transition (if any) this event actually caused
     received_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    processed_at        TIMESTAMPTZ NULL
+                        -- this table's created_at under BRD §24.3, in the domain's own webhook
+                        -- vocabulary
+    processed_at        TIMESTAMPTZ NULL,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),   -- BRD §24.3; bumped when processed_at is set
+    created_by          TEXT NOT NULL DEFAULT 'system:payment-gateway-webhook-consumer',
+                        -- BRD §24.3 — every row here originates from the gateway webhook
+                        -- ingestion path; no human/API caller ever inserts one directly
+    updated_by          TEXT NOT NULL DEFAULT 'system:payment-gateway-webhook-consumer'
+                        -- BRD §24.3 — same process is the sole writer across this row's lifecycle
 );
 
 CREATE INDEX idx_gateway_webhook_events_intent ON gateway_webhook_events (payment_intent_id, received_at);
@@ -117,6 +154,27 @@ CREATE INDEX idx_gateway_webhook_events_intent ON gateway_webhook_events (paymen
 ## GDPR Erasure (ADR-0016) — Checked, No Action Needed
 
 ADR-0016 names "Payment's transaction records" as an example of financial history that must be retained-but-anonymized (`userId` kept as an opaque referential key, directly-identifying fields tombstoned) rather than hard-deleted on `UserDataErased`. Checked against the actual schema above and found to already satisfy this trivially, not to require a new consumer: `payment_intents` never stores `userId` at all (only `order_id`, itself opaque) and holds no directly-identifying field (`name`, `email`, `address`) anywhere in this service's schema — `gateway_token` is itself an opaque, non-identifying PCI-tokenized reference, not PII. There is nothing here to redact, and therefore no reason for `kart-payment-service` to consume `UserDataErased` — recorded explicitly so a future reader of ADR-0016 doesn't have to re-derive this or mistakenly add a redaction handler for fields that don't exist.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security — never a shared, central component. Payment's write model is entirely PostgreSQL (`payment_intents`, `refunds`, `idempotency_keys`, `gateway_webhook_events`), which is the precondition for native RLS to even be the candidate mechanism — but BRD §24.1.4 itself names this exact table as its own worked carve-out example: *"Payment's `payment_intents` (per `database-design.md`) never stores `user_id` directly — it keys only on the opaque `order_id`, so a `user_id`-shaped row-level policy would not even apply."*
+
+**None of Payment's four tables has a per-row end-user ownership column, so a native ownership-predicate RLS policy is not applicable to any of them** — verified directly against the schema above, the same verification the "GDPR Erasure" section immediately above already performed for the identical reason (no `user_id`/PII column exists anywhere in this service's schema):
+
+- `payment_intents` / `refunds` key on `order_id` (opaque, Order-owned) and `payment_intent_id` respectively — never `user_id`. There is no end-user JWT claim (`sub`) that maps directly onto a row here the way `carts.user_id` or `orders.user_id` does elsewhere on this platform; the callers that legitimately reach these tables are Order's own Saga-step consumers (system context), the `OrderCreated` consumer (system context), and a Support Agent acting under the §24.1.2 inline refund-cap business rule (a coarse-role + data-dependent check, not a per-row ownership comparison) — none of which RLS's ownership-predicate model is designed to express.
+- `idempotency_keys` keys on `(idempotency_key, endpoint)` — a caller-supplied deduplication token, not an ownership column; the same reasoning applies.
+- `gateway_webhook_events` keys on `gateway_event_id` — a gateway-assigned identifier with no end-user relationship at all; this table is never read or written by any end-user-facing request path (only the webhook ingestion consumer and internal support/on-call triage touch it, per the Indexing Rationale table above).
+- This is the same "no per-row end-user ownership concept" carve-out `kart-identity-service/database-design.md` and `kart-cart-service/database-design.md` both already document for their own operator-managed/internal-only tables (`idp_group_role_mappings`, `cart_outbox_events`) — Payment's carve-out simply spans its entire schema, because none of Payment's tables was ever designed around end-user row ownership in the first place (BRD §5.3's own boundary rationale: Payment's callers are Order, the gateway, and Support Agent tooling, never a customer directly).
+
+**What still protects these tables:** access control here lives entirely at §24.1.2's tier (the Support Agent refund-cap inline business rule, plus restricting `CanWrite` on charge to Order's own system-context triggers) and at the database-credential/connection-role boundary (only Payment's own application service role, plus the narrow internal support-tooling/webhook-consumer contexts, ever hold a connection at all) — not at a per-row predicate, because there is no per-row ownership dimension for a predicate to key on. This is additive reasoning, not a weaker posture: BRD §24.1.3's three-check enforcement flow still applies in full via its first two checks (Gateway coarse role, Payment's own inline CanWrite rule); only the third check (§24.1.4's row-level layer) has no row-ownership shape to attach to here, exactly as the BRD's own worked example anticipates.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see — full value, masked, or nothing. **Payment is the exact worked example BRD §24.1.5 itself names**, so this classification grounds directly in that stated conclusion rather than deriving one from scratch: *"No — Payment Service: no unmasked PCI data exists to protect in the first place — payment credentials are tokenized at the gateway and never stored."*
+
+Verified against the actual schema above: `payment_intents.gateway_token` is an opaque, gateway-issued reference (ddd-model.md's `GatewayToken` value object) — never raw card/PAN data — so there is no plaintext sensitive column to mask in the first place; masking a token that is already non-identifying and useless outside Payment's own gateway integration would add no protection. `refunds`/`idempotency_keys`/`gateway_webhook_events` hold only amounts, statuses, hashes, and gateway-assigned identifiers — none of it PII or PCI data. This is a **stronger** control than role-based masking, not a weaker one: there is no unmasked form of this data to accidentally over-expose to a caller who passed the row-level/§24.1.2 checks, the same reasoning `kart-identity-service/database-design.md` applies to its own never-serialized credential-hash columns (a narrower, stronger control than masking).
+
+**Enforcement point:** not applicable in the primary API-response-shaping sense §24.1.5 describes, since there is no sensitive value to differentially shape per role. The only column meriting any caution at all is `gateway_token` itself, and that caution is already fully met by never returning it in any API response regardless of caller role (it has no legitimate external consumer — the gateway adapter is the only code that ever dereferences it) — the same "never-serialized rather than merely role-masked" pattern Identity applies to its own credential material.
 
 ## Sign-off
 

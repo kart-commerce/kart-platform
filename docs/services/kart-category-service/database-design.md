@@ -42,6 +42,8 @@ CREATE TABLE categories (
                             -- chosen: soft-delete, because category_id is the Product/Search shard key)
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by      TEXT NOT NULL,      -- BRD §24.3: Admin's own operator/client identity that created this node -- no self-service end-user write path exists for Category
+    updated_by      TEXT NOT NULL,      -- BRD §24.3: Admin's own operator/client identity that performed the most recent rename/move/deprecate
 
     CHECK (depth BETWEEN 1 AND 4),
                             -- requirement-spec §4 Domain Invariant: "Maximum hierarchy depth is 4 levels"
@@ -93,10 +95,12 @@ CREATE TABLE category_outbox_events (
                             -- {categoryId, name} today; JSONB lets the Event Design Agent grow this
                             -- (e.g. a path/parentId field for subtree-move consumers, requirement-spec
                             -- §5) without a schema migration
-    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at    TIMESTAMPTZ NULL
+    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
+    published_at    TIMESTAMPTZ NULL,
                             -- set only by the Outbox relay after a successful publish to
                             -- ecommerce.events with the 3x retry / catalog.dlq policy (BRD §10, ADR-0008)
+    created_by      TEXT NOT NULL,      -- BRD §24.3: the Admin operator/client identity whose taxonomy write produced this outbox row
+    updated_by      TEXT NOT NULL DEFAULT 'system:category-outbox-relay' -- BRD §24.3: the Outbox relay is the only process that ever updates a row after insert (setting published_at)
 );
 
 -- The relay's own scan: "find everything not yet published, oldest first" — same pattern as
@@ -114,6 +118,18 @@ Not a MongoDB read model (ADR-0011) and not a rebuildable CQRS projection with i
 - `category:children:{parentId}` (sentinel `root` for depth-1 nodes) → ordered JSON array of child summaries `{id, name, hasChildren}`, backing the primary `/categories` navigation read.
 - `category:node:{categoryId}` → JSON detail `{id, name, parentId, ancestorPath, depth, status}`, backing breadcrumb/single-node reads.
 - **Every** taxonomy write (create/rename/move/deprecate) updates the affected entries synchronously, in the same operation as the PostgreSQL write — not a bare TTL-expiry or invalidate-then-repopulate-on-next-read (`design-decisions.md`). A create/rename/deprecate touches its own `category:node:{id}` entry and its parent's `category:children:{parentId}` entry; a subtree move additionally updates `category:node:{id}` for every descendant whose `ancestorPath` changed, plus the old-parent and new-parent `category:children` entries — this is an application-level loop over the moved subtree (bounded by the max-depth-4 invariant), not a per-descendant `CategoryUpdated` event fan-out (edge-cases.md already fixes the event itself as one coarse row per move; the cache update is a separate, synchronous mechanism this stage owns).
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Neither of Category's tables has a per-row end-user ownership column — a taxonomy node is public navigation data, not owned by the principal who happens to have created or last edited it (`created_by`/`updated_by` above are audit provenance, not an access-control predicate). This is the same carve-out BRD §24.1.4 itself anticipates via its own Payment `payment_intents` example ("never stores `user_id` directly... a `user_id`-shaped row-level policy would not even apply") and the one `kart-identity-service`/`kart-product-service` already apply to their own platform-config/catalog tables with no per-row ownership concept.
+
+- **`categories`** — no per-row ownership concept: `ENABLE ROW LEVEL SECURITY` is not applied. Access control lives one layer up, at the application's own `CanWrite` role-claim check (§24.1.2, ddd-model.md's Domain Invariants) — `CanRead` is unconditional (any principal), so no read-side filtering applies either.
+- **`category_outbox_events`** — an internal relay table read exclusively by this service's own Outbox relay process, never by any end-user- or admin-facing request path directly; `created_by` records event-payload provenance for audit, not an access-control predicate, the same carve-out `kart-identity-service`/`kart-product-service`'s own outbox tables already document.
+- No MongoDB read model exists for this service (ADR-0011), so the §24.1.4 Mongo query-builder-filter alternative does not apply here.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+**No sensitive/PII columns exist.** Every column on `categories` — `name`, `parent_id`, `ancestor_path`, `depth`, `status` — is public taxonomy/navigation content, not personal data about any individual, and there is no analogue here to Payment's tokenized-credential case or User's address/phone. `created_by`/`updated_by` identify an Admin operator/client, not an end customer, so they carry no PII-masking concern either. Per §24.1.5's own reasoning ("sensitivity is domain knowledge... There is no platform-wide 'sensitive column' list"), the correct classification for a public taxonomy service is an explicit statement that none applies, rather than forcing an artificial masking rule onto fields with no sensitivity to protect.
 
 ## Indexing Rationale
 

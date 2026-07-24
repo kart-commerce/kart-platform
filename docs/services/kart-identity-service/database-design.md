@@ -32,7 +32,9 @@ CREATE TABLE users (
     locked_at            TIMESTAMPTZ NULL,        -- set by POST /internal/users/{userId}/lock (Admin Service's client-credentials caller only, ADR-0010); NULL = not locked
     locked_by            TEXT NULL,               -- Admin Service's service-principal id, from the calling client-credentials token, for audit
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now() -- bumped whenever email/display_name changes; the trigger/application write that bumps this is also what enqueues UserAccountUpdated (ADR-0006) into outbox_events below
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped whenever email/display_name changes; the trigger/application write that bumps this is also what enqueues UserAccountUpdated (ADR-0006) into outbox_events below
+    created_by           TEXT NOT NULL,           -- BRD §24.3: the acting principal at insert time. Self-registration/JIT-provisioned rows have no prior authenticated caller to attribute the insert to, so created_by is set to the row's own newly-generated user_id (self-created), distinguishing it from an operator- or system-initiated insert while still never being NULL
+    updated_by           TEXT NOT NULL           -- BRD §24.3: the acting principal on the most recent update -- the caller's own user_id for self-service /auth/profile updates, or Admin Service's service-principal client_id for lock/unlock (mirrors locked_by above, now generalized platform-wide)
 );
 
 -- Case-insensitive uniqueness for native login lookup and duplicate-registration
@@ -54,7 +56,10 @@ CREATE TABLE federated_identities (
     idp_type              TEXT NOT NULL CHECK (idp_type IN ('enterprise', 'social')),
     idp_key               TEXT NOT NULL,          -- idpAlias for enterprise (Okta/Azure AD/Google Workspace instance), provider for social (google/apple) -- matches api-contract.yaml's {idpAlias}/{provider} path params
     external_subject_id   TEXT NOT NULL,           -- the IdP's own subject/NameID for this identity -- Identity never generates this
-    linked_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(), -- renamed from linked_at: BRD §24.3 wants a uniform created_at shape platform-wide ("no domain reason for Order's audit columns to look different from Review's"); "linked" remains the domain verb used in prose elsewhere in this file, this column is just its timestamp
+    created_by             TEXT NOT NULL,          -- the owning user_id -- a federation link is always self-service (both JIT paths are the user's own first login), never created on a user's behalf by a third party
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(), -- no update path exists in v1 (a link is created once, never edited) -- carried for platform-wide §24.3 uniformity and to cover a future unlink/re-link path without a schema change
+    updated_by             TEXT NOT NULL           -- mirrors created_by until an update path exists
 );
 
 -- The JIT-provisioning existence check at every federated callback
@@ -81,7 +86,9 @@ CREATE TABLE idp_group_role_mappings (
     external_group_claim  TEXT NOT NULL,           -- the IdP's own group/claim value, e.g. an Okta/Azure AD group name
     role                  TEXT NOT NULL CHECK (role IN ('support_agent', 'admin')), -- 'customer'/'partner_api' are never federation-mapped targets (requirement-spec.md §2/§4: Admin is never auto-granted merely by a successful assertion -- an explicit mapping row is what grants it, this CHECK just narrows to the two roles federation can plausibly grant)
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by            TEXT NOT NULL            -- operator identity/process that created the mapping, for audit
+    created_by            TEXT NOT NULL,           -- operator identity/process that created the mapping, for audit
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(), -- BRD §24.3 uniformity; bumped if an operator ever re-points an existing mapping's role instead of deleting/recreating it
+    updated_by            TEXT NOT NULL            -- operator identity/process that last modified the mapping
 );
 
 -- Read on every enterprise-federated login's role resolution
@@ -109,9 +116,11 @@ CREATE TABLE user_roles (
     user_role_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID NOT NULL REFERENCES users(user_id),
     role            TEXT NOT NULL CHECK (role IN ('customer', 'support_agent', 'admin')), -- 'partner_api' is a ServicePrincipal-only role, see service_principals below
-    granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    granted_by      TEXT NOT NULL,           -- 'self-registration', 'social-jit', or an admin/operator principal id
-    revoked_at      TIMESTAMPTZ NULL
+    granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own grant vocabulary -- the same "granted_at" naming precedent BRD §24.1.2's own admin_permission_grants worked example uses, not duplicated as a second created_at column
+    granted_by      TEXT NOT NULL,           -- this table's created_by under BRD §24.3 -- 'self-registration', 'social-jit', or an admin/operator principal id
+    revoked_at      TIMESTAMPTZ NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped whenever revoked_at is set (a grant is revoked, never edited otherwise)
+    updated_by      TEXT NOT NULL            -- the principal that performed the most recent update (i.e. whoever revoked the grant); equals granted_by until revocation
 );
 
 -- At most one *live* grant per (user, role) -- read at every native/social
@@ -133,9 +142,12 @@ CREATE TABLE mfa_credentials (
     user_id             UUID PRIMARY KEY REFERENCES users(user_id), -- one active TOTP credential per user; enrolling again replaces the row
     encrypted_secret     BYTEA NOT NULL,          -- AES-256 encrypted TOTP secret
     status               TEXT NOT NULL CHECK (status IN ('pending', 'active')),
-    enrolled_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    enrolled_at          TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own enrollment vocabulary
     pending_expires_at   TIMESTAMPTZ NULL,        -- set only while status = 'pending'
-    confirmed_at         TIMESTAMPTZ NULL
+    confirmed_at         TIMESTAMPTZ NULL,
+    created_by           TEXT NOT NULL,           -- always the owning user_id -- MFA enrollment is exclusively self-service, never performed on a user's behalf by another principal
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped on the pending -> active confirmation write and on re-enrollment replace
+    updated_by           TEXT NOT NULL            -- always the owning user_id, same reasoning as created_by
 );
 
 -- =====================================================================
@@ -162,7 +174,10 @@ CREATE TABLE sessions (
     revoked_at           TIMESTAMPTZ NULL,
     revoked_reason        TEXT NULL CHECK (revoked_reason IS NULL OR revoked_reason IN (
                               'logout', 'reuse_detected', 'admin_lock', 'role_change', 'password_reset', 'erasure'
-                          )) -- 'erasure' added: set by the UserDataErased consumer (ADR-0016; ddd-model.md's UserIdentity aggregate) when revoking every live session for an erased user
+                          )), -- 'erasure' added: set by the UserDataErased consumer (ADR-0016; ddd-model.md's UserIdentity aggregate) when revoking every live session for an erased user
+    created_by            TEXT NOT NULL,          -- the owning user_id -- a session is always created by the act of that same user authenticating, never on a user's behalf by another principal
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped whenever revoked_at/revoked_reason is set
+    updated_by            TEXT NOT NULL           -- the principal that revoked the session: the owning user_id (logout, role_change, password_reset), 'system:identity-reuse-detection' (reuse_detected), Admin Service's client_id (admin_lock), or 'system:user-service-erasure-consumer' (erasure)
 );
 
 -- Enumerate a user's live sessions -- the write path for admin-triggered
@@ -187,10 +202,13 @@ CREATE TABLE refresh_tokens (
     session_id           UUID NOT NULL REFERENCES sessions(session_id),
     parent_token_id      UUID NULL REFERENCES refresh_tokens(token_id), -- NULL for a session's first-issued token; forms the rotation lineage edge-cases.md's decision requires storing
     token_hash           TEXT NOT NULL,
-    issued_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    issued_at            TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own token vocabulary
     expires_at           TIMESTAMPTZ NOT NULL,     -- min(issued_at + 30d, session.absolute_expires_at) for native (sliding, recalculated on each rotation); session.absolute_expires_at itself for federated (no sliding)
     consumed_at          TIMESTAMPTZ NULL,         -- set by the rotation write; NULL = still the live, presentable token for this session
-    replaced_by_token_id UUID NULL REFERENCES refresh_tokens(token_id)
+    replaced_by_token_id UUID NULL REFERENCES refresh_tokens(token_id),
+    created_by           TEXT NOT NULL,           -- the owning session's user_id, resolved at issuance (initial login) or at the prior rotation (refresh) -- never a third party
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped when consumed_at/replaced_by_token_id is set by the rotation write
+    updated_by           TEXT NOT NULL            -- the owning session's user_id for a normal rotation, or 'system:identity-reuse-detection' when the write is the reuse-triggered revocation path rather than a normal rotation
 );
 
 -- O(1) lookup of the presented token at every POST /auth/refresh call --
@@ -219,9 +237,12 @@ CREATE TABLE password_reset_tokens (
     reset_token_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID NOT NULL REFERENCES users(user_id),
     token_hash      TEXT NOT NULL,
-    issued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    issued_at       TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3
     expires_at      TIMESTAMPTZ NOT NULL,
-    consumed_at     TIMESTAMPTZ NULL
+    consumed_at     TIMESTAMPTZ NULL,
+    created_by      TEXT NOT NULL,           -- the owning user_id -- a reset token is always requested by (or on behalf of, via /auth/password/reset-initiate's email lookup) that same user
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped when consumed_at is set
+    updated_by      TEXT NOT NULL            -- the owning user_id, same reasoning as created_by
 );
 
 CREATE UNIQUE INDEX uq_password_reset_tokens_hash ON password_reset_tokens (token_hash);
@@ -242,7 +263,10 @@ CREATE TABLE service_principals (
     client_secret_hash    TEXT NOT NULL,          -- one-way hash, same treatment as users.password_hash
     role                  TEXT NOT NULL CHECK (role IN ('admin', 'partner_api')), -- the two roles a non-interactive service principal can plausibly hold (requirement-spec.md §2: "not applicable to Partner API" for MFA, i.e. Partner API is itself a role a client-credentials principal can carry)
     status                TEXT NOT NULL CHECK (status IN ('active', 'revoked')) DEFAULT 'active',
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by            TEXT NOT NULL,          -- the operator/provisioning process that registered this Partner API client or Admin Service's own principal -- never a value the client itself supplies
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped when status transitions active -> revoked
+    updated_by            TEXT NOT NULL           -- the operator/process that last changed status
 );
 
 -- =====================================================================
@@ -262,8 +286,11 @@ CREATE TABLE outbox_events (
     aggregate_id   UUID NOT NULL,                  -- users.user_id
     event_type     TEXT NOT NULL CHECK (event_type IN ('UserRegistered', 'SessionCreated', 'UserAccountUpdated')),
     payload        JSONB NOT NULL,
-    occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at   TIMESTAMPTZ NULL                -- set only by the Outbox poller after a successful publish to ecommerce.events (kart-conventions.md)
+    occurred_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- this table's created_at under BRD §24.3, in the domain's own event vocabulary
+    published_at   TIMESTAMPTZ NULL,               -- set only by the Outbox poller after a successful publish to ecommerce.events (kart-conventions.md)
+    created_by     TEXT NOT NULL,                  -- the principal whose domain mutation produced this outbox row (the acting user_id for UserRegistered/UserAccountUpdated, or the authenticating user_id for SessionCreated)
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- bumped when published_at is set
+    updated_by     TEXT NOT NULL DEFAULT 'system:identity-outbox-poller' -- the Outbox poller is the only process that ever updates a row after insert
 );
 
 -- Standard Outbox poller scan (BRD §11) -- keeps it an index range-scan,
@@ -274,6 +301,95 @@ CREATE INDEX idx_outbox_events_unpublished ON outbox_events (occurred_at) WHERE 
 ### Note on `CITEXT`
 
 `users.email` uses PostgreSQL's `citext` extension for case-insensitive comparison/uniqueness, avoiding an application-layer `lower(email)` normalization step on every login/registration write and read. This is a standard PostgreSQL extension, not a new external dependency; if `citext` is unavailable in the target environment, the equivalent is a `TEXT` column plus a `lower(email)` expression-based unique index and lower-cased comparisons everywhere `email` is queried -- flagged here as an implementation choice, not a requirement-spec-stated one.
+
+## Row-Level Security Policy (BRD §24.1.4)
+
+Per BRD §24.1.4, the service whose database physically holds a row decides and enforces that row's row-level security. Identity's write model is 100% PostgreSQL with no MongoDB read model (see Read Model / Cache below), so native RLS is the mechanism for every table with a per-row end-user ownership concept.
+
+**Session-scoped principal setting.** Immediately after acquiring a pooled connection and before any query runs, Identity's application issues `SET LOCAL app.current_principal = <id>` and `SET LOCAL app.current_principal_kind = <'user'|'service'|'system'>` -- never a client-suppliable value, always resolved server-side from the validated JWT/client-credentials context. `app.current_principal` is the caller's own `user_id` for self-service requests, the calling service-principal's `client_id` for Admin's internal lock/unlock, or a well-known `system:*` id for background/consumer processes. This is the same resolved-principal value the shared `kart-shared` `created_by`/`updated_by` interceptor (§24.3, below) stamps onto every mutation -- RLS and audit-column injection read one ambient current-principal accessor from that same package, not two independently-maintained notions of "who is acting."
+
+**Policy shape.** Every user-owned table's policy grants access when the row's `user_id` matches `app.current_principal`, **or** when `app.current_principal_kind` is `service`/`system`. The latter branch is not a blanket bypass: it is only ever reached by requests that already passed a narrower, more specific authorization check one layer up (BRD §24.1.3 check #2) before the database is touched at all -- Admin's lock/unlock is already restricted to Admin Service's own client-credentials principal at the API layer (requirement-spec.md §2), and the `UserDataErased` consumer / Outbox poller / reuse-detection path are internal processes no external caller can reach. RLS's marginal, additive protection here is specifically against the failure mode §24.1.4 itself names -- a user-facing code path that forgets its `WHERE user_id = ...` clause -- which stays fully blocked whenever `app.current_principal_kind = 'user'`.
+
+```sql
+-- users
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY users_owner_or_system ON users
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- federated_identities
+ALTER TABLE federated_identities ENABLE ROW LEVEL SECURITY;
+CREATE POLICY federated_identities_owner_or_system ON federated_identities
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- mfa_credentials
+ALTER TABLE mfa_credentials ENABLE ROW LEVEL SECURITY;
+CREATE POLICY mfa_credentials_owner_or_system ON mfa_credentials
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- sessions
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY sessions_owner_or_system ON sessions
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- password_reset_tokens
+ALTER TABLE password_reset_tokens ENABLE ROW LEVEL SECURITY;
+CREATE POLICY password_reset_tokens_owner_or_system ON password_reset_tokens
+    USING (
+        user_id = current_setting('app.current_principal')::uuid
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+
+-- refresh_tokens: no direct user_id column (keyed via session_id) -- the
+-- ownership predicate is expressed as a subquery against sessions rather
+-- than denormalizing a user_id column onto every token row.
+ALTER TABLE refresh_tokens ENABLE ROW LEVEL SECURITY;
+CREATE POLICY refresh_tokens_owner_or_system ON refresh_tokens
+    USING (
+        session_id IN (
+            SELECT session_id FROM sessions
+            WHERE user_id = current_setting('app.current_principal')::uuid
+        )
+        OR current_setting('app.current_principal_kind', true) IN ('service', 'system')
+    );
+```
+
+**Bootstrapping exception (registration, login, and the refresh-token-by-hash lookup).** Three operations necessarily run *before* any owning `user_id` is known to the request: `/auth/register` (the row doesn't exist yet), `/auth/login`'s credential lookup (the caller hasn't yet proven which account is theirs), and `/auth/refresh`'s initial lookup of the presented `token_hash` (the hash itself, not a pre-established principal, is the proof of ownership -- equivalent to a bearer secret, the same reasoning ddd-model.md's `Session` aggregate invariant states). These three queries run with `app.current_principal_kind` set to `'service'` for the duration of that one lookup only; the instant the row's true owner is resolved (credential match, or the refresh token's `session_id → user_id`), the connection's `app.current_principal` is set to that resolved `user_id` for every subsequent query in the same request (the rotation `UPDATE`, new session/token inserts, the Outbox insert) -- the bootstrap exception is scoped to the one unavoidable lookup, not the whole request.
+
+**Not covered by this policy (no per-row end-user ownership concept):**
+
+- `idp_group_role_mappings` -- an operator-managed platform-config table (requirement-spec.md §2, resolved Open Question #7), not owned per-row by any interactive end user; no end-user-facing endpoint reads or writes it (this file's own note above: "no endpoint for it exists yet"). RLS doesn't apply for the same reason it doesn't apply to a reference/lookup table -- there is no `user_id`-shaped ownership column to key a policy on, the same carve-out BRD §24.1.4 itself anticipates via its Payment `payment_intents` example.
+- `service_principals` -- rows represent non-interactive Partner API clients and Admin Service's own principal, provisioned by platform operators, not end users; the only queries against it are direct `client_id` primary-key lookups performed by Identity's own token-issuance code (`POST /auth/token`), never a query an end-user-scoped principal could reach. Same "no per-row ownership concept" carve-out, per ddd-model.md's `ServicePrincipal` invariant.
+- `user_roles` -- keyed on `user_id`, so in principle RLS-able the same way as `users`, but deliberately not scoped here: every read of this table happens exclusively inside Identity's own token-mint-time role-resolution code path (never a general-purpose per-user query an end-user-facing request issues directly), and the fail-closed grant/revoke writes are themselves restricted to the internal admin/operator process named in this table's own comments above -- adding a redundant RLS policy on a table already reached by exactly one, fully-trusted internal code path would be defense-in-depth against a code path that doesn't exist, not a real risk reduction.
+- `outbox_events` -- an internal relay table read exclusively by the Outbox poller process, never by any end-user- or even admin-facing request path; `aggregate_id` records provenance for audit, not an access-control predicate.
+
+## Sensitive / PII Column Classification (BRD §24.1.5)
+
+Column-level security answers a narrower question than row-level security: of the columns in a row a caller already has `CanRead` on (BRD §24.1.2), which does that caller's own coarse role actually see -- full value, masked, or nothing. Identity owns several of the platform's most sensitive columns by construction, since credential and token material *is* this service's domain, so this classification is unusually load-bearing here compared to most other services.
+
+| Column | Full Value Visible To | Masked/Omitted For | Masking Rule |
+|---|---|---|---|
+| `users.password_hash` | No one, via any API response, ever | Every role, including the owning user | A one-way hash is never returned by any endpoint (`/auth/profile`, `/auth/login` response, etc.) regardless of caller -- not a masking rule so much as the column never appearing in any response DTO in the first place; the only legitimate reader is the login/password-change comparison code path itself |
+| `mfa_credentials.encrypted_secret` | No one, via any API response, ever | Every role, including the owning user | Same treatment as `password_hash` -- the AES-256-encrypted TOTP secret is read server-side only, to validate a submitted code (`POST /auth/mfa/verify`) or to render the enrollment QR/URI once at `POST /auth/mfa/enroll` (immediately, never re-served after); never included in any subsequent read response |
+| `refresh_tokens.token_hash`, `password_reset_tokens.token_hash` | No one, via any API response, ever | Every role, including the owning user | Token hashes are write/compare-only columns, identical treatment to `password_hash` -- a hash being readable back would still be useless to a legitimate caller and is simply never serialized |
+| `service_principals.client_secret_hash` | No one, via any API response, ever | Every role | Same one-way-hash treatment as `password_hash` -- issued once at out-of-band provisioning time, never re-served |
+| `federated_identities.external_subject_id` | Owning user, Admin | Support Agent | The external IdP's own subject/NameID is an SSO-federation identifier that can be correlated back to the user's identity at the external IdP; Support Agent's legitimate need (helping a customer troubleshoot federated login) is met by knowing *that* an account is federated and via which `idp_key`/provider, not the raw external subject id itself |
+| `users.email` | Owning user, Admin, Support Agent | No other principal | Not really a role-*masking* case in practice -- the row-level policy above already prevents any principal other than the owner/Admin/a ticket-handling Support Agent from reaching the row at all; there is no endpoint in this API surface that returns another user's email to a Customer-scoped caller in the first place |
+
+**Why this list and no more:** `users.display_name`/`account_origin`/`locked_at`/`locked_by`, session metadata (`is_federated`, `idp_alias`, timestamps), and the §24.3 audit columns are not classified as sensitive here -- they carry no credential material and are either already scoped by the row-level policy (only the owner/Admin/Support Agent ever reach the row) or are operationally necessary for a caller who can already see the row (e.g., a locked user needs to see that they're locked). This mirrors BRD §24.1.5's own reasoning for Payment Service ("no unmasked PCI data exists to protect in the first place" for the columns that don't carry it) -- Identity's genuinely dangerous columns are already never-serialized rather than merely role-masked, which is a narrower and stronger control than masking.
+
+**Enforcement point:** primarily each endpoint's own response-serialization DTO (api-contract.yaml) omitting the columns above entirely, per §24.1.5's stated primary control; secondarily, for any direct database connection bypassing Identity's own API (an analytics/BI read-replica, ops tooling), native `GRANT SELECT (col1, col2, ...) ON table TO <db_role>` restricted to exclude every never-serialized column above for any database role other than Identity's own application service role.
 
 ## Read Model / Cache
 
