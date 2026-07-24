@@ -1,33 +1,27 @@
 # doc_type: api-contract
 # service: kart-admin-service
-# status: pending-approval
+# status: approved
 # generated_by: api-design-agent
 # source: docs/services/kart-admin-service/requirement-spec.md,
 #         docs/services/kart-admin-service/edge-cases.md,
-#         docs/services/kart-admin-service/design-decisions.md (proposed),
-#         docs/services/kart-admin-service/architecture.md (pending-approval),
-#         docs/services/kart-admin-service/database-design.md (pending-approval),
-#         docs/services/kart-admin-service/event-contract.md (pending-approval),
+#         docs/services/kart-admin-service/design-decisions.md,
+#         docs/services/kart-admin-service/architecture.md,
+#         docs/services/kart-admin-service/database-design.md,
+#         docs/services/kart-admin-service/event-contract.md,
+#         docs/services/kart-admin-service/ddd-model.md,
 #         docs/adr/0010-admin-service-scope-and-integration.md
 #
-# Process note (per this agent's own input contract): the normal input to this
-# stage is an *approved* ddd-model.md. No ddd-model.md exists for this service
-# at all — database-design.md's and event-contract.md's own header notes
-# already record why and cite the same basis this contract relies on:
-# ADR-0010's Consequences section fixes Admin's domain shape as narrow enough
-# to design directly from requirement-spec.md §4/§6, edge-cases.md,
-# design-decisions.md, architecture.md, database-design.md, and
-# event-contract.md — "Admin's own DDD model has exactly one aggregate root
-# of its own consequence — the admin action / permission grant." This draft
-# was produced anyway, at the orchestrating pipeline's explicit direction,
-# from those docs as the best available grounding (identical situation and
-# identical handling to kart-identity-service/api-contract.yaml, which
-# predates its own ddd-model.md for the same reason). Flagged explicitly
-# rather than silently treated as equivalent to a real ddd-model.md: a human
-# must confirm this contract stays consistent once/if a ddd-model.md is ever
-# produced for this service, and status cannot move past pending-approval
-# until design-decisions.md/architecture.md/database-design.md/event-contract.md
-# are themselves approved.
+# Process note update: this contract was originally drafted before
+# ddd-model.md existed for this service (design-decisions.md/architecture.md/
+# database-design.md/event-contract.md were also still proposed/pending-
+# approval at the time) — the same situation kart-identity-service/
+# api-contract.yaml predated its own ddd-model.md for. All five have since
+# been produced/approved, and this contract has been re-checked against
+# ddd-model.md's two aggregates (AdminPermissionGrant, AdminAction) — no
+# endpoint below contradicts that model (every /admin/permission-grants
+# route maps to AdminPermissionGrant; every other /admin/* route produces an
+# AdminAction row via its mapped category, per ddd-model.md's Cross-Aggregate
+# Interaction section), so no rework was needed. Status now approved.
 #
 # No breaking-change risk: first issue of this contract, nothing published to
 # a shared-contracts repo yet. Publishing a stable copy to kart-shared is

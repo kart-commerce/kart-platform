@@ -1,14 +1,14 @@
 ---
 doc_type: database-design
 service: kart-admin-service
-status: pending-approval
+status: approved
 generated_by: database-design-agent
-source: docs/services/kart-admin-service/requirement-spec.md, docs/services/kart-admin-service/edge-cases.md, docs/services/kart-admin-service/design-decisions.md, docs/services/kart-admin-service/architecture.md, docs/adr/0010-admin-service-scope-and-integration.md
+source: docs/services/kart-admin-service/requirement-spec.md, docs/services/kart-admin-service/edge-cases.md, docs/services/kart-admin-service/design-decisions.md, docs/services/kart-admin-service/architecture.md, docs/services/kart-admin-service/ddd-model.md, docs/adr/0010-admin-service-scope-and-integration.md
 ---
 
 # Database Design: kart-admin-service
 
-No `ddd-model.md` exists for this service — ADR-0010's Consequences section already fixes Admin's domain shape as narrow enough to design directly from `requirement-spec.md` §4/§6, `edge-cases.md`, `design-decisions.md`, and `architecture.md`: "Admin's own DDD model has exactly one aggregate root of its own consequence — the admin action / permission grant — never a `Product`, `Category`, `Coupon`, or `InventoryStock` aggregate." Consistent with that and with Domain Invariant #3 (`requirement-spec.md` §4: "Admin Service never becomes a second owner of another service's domain data"), this write model holds exactly two Admin-owned tables and nothing else — no local copy of Product/Category/Coupon/user-identity/Inventory data.
+**Superseded note (corrected on this pass):** this section previously read "No `ddd-model.md` exists for this service," citing ADR-0010's Consequences section directly. `docs/services/kart-admin-service/ddd-model.md` has since been authored (its own "Pipeline-order note" explicitly flags that this prose was stale) — that prose is now corrected in place rather than left to drift, the same way `kart-analytics-service/database-design.md` later corrected its own identical note. `ddd-model.md`'s Boundary Summary confirms the same shape this document already assumed, refined into **two** aggregate roots rather than ADR-0010's slash-joined singular: `AdminPermissionGrant` and `AdminAction`, mapping 1:1 onto the two tables already built below (`admin_permission_grants`, `admin_actions` respectively), with the `PermissionCategory` value object matching this document's own `category` `CHECK` constraint field-for-field on both tables. No schema rework was needed to reconcile the two documents — `ddd-model.md` was written to be consistent with this already-built schema, not the other way around — so this write-model design stands as previously drafted. Consistent with Domain Invariant #3 (`requirement-spec.md` §4: "Admin Service never becomes a second owner of another service's domain data"), this write model holds exactly two Admin-owned tables and nothing else — no local copy of Product/Category/Coupon/user-identity/Inventory data.
 
 Write model is PostgreSQL (source of truth) for both tables. No read model (MongoDB/Redis) is introduced: Admin has no read-heavy, latency-budgeted query path of its own (it is absent from the Order Saga and BRD §5.5's diagram — secondary availability tier, no dedicated customer-facing latency SLA, per `requirement-spec.md` §3 Decision D4), and `design-decisions.md`'s "Caching Strategy for Fine-Grained Permission Grants" decision explicitly rules out any cache (including Redis) in front of the permission-grant lookup, to avoid reopening the staleness window `edge-cases.md`'s "Stale Admin Permission Outliving an Identity-Side Revocation" closes. `AdminActionPerformed` is published via the standard PostgreSQL Outbox pattern (BRD §11), not projected into a separate read store — Analytics is the sole consumer and reads the event off the queue, not off Admin's database.
 
@@ -133,5 +133,5 @@ Not needed at current scale for either table. `admin_permission_grants` is bound
 
 ## Sign-off
 
-- [ ] Reviewed by: _pending human review_
-- [ ] Approved (write-model schema)
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved (write-model schema)

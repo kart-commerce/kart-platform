@@ -363,3 +363,19 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | UserId | kart-identity-service | Every `userId` field is a reference only; never models authentication or session state |
 | Order / OrderDelivered | kart-order-service | Consumed only as the purchase-signal trigger; never models Order's own Saga/state machine |
 | WarehouseStock | kart-inventory-service | Consulted only for live stock-level filtering at read time; never models Inventory's own reservation aggregate |
+
+## Owned by `kart-admin-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| AdminPermissionGrant | The category-scoped, default-deny fine-grained permission record for one `(principalId, category)` pair — issued, and only ever revoked (never deleted), by a principal already holding a live `permission-management` grant; identified by `grantId` | Aggregate root |
+| PermissionCategory | The closed five-value set a grant or action is scoped to: `catalog-management \| coupon-issuance \| user-suspension \| inventory-replenishment \| permission-management` (ADR-0010; `requirement-spec.md` §6 Decision item 1) | Value object |
+| AdminAction | The append-only, transactionally-atomic record of one completed back-office action, doubling as the Outbox row for `AdminActionPerformed`; identified by `actionId` | Aggregate root |
+| AdminActionPerformed | Domain event (BRD §5.4; full catalog row added by ADR-0007): published once an `AdminAction` row's local commit lands, consumed by Analytics as its sole audit-trail source | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-admin-service` uses it |
+|---|---|---|
+| Admin (coarse role claim) | kart-identity-service | `AdminPermissionGrant`/`AdminAction` reference `principalId`/`adminId` as an opaque Identity-issued id only; Admin never models Identity's own role/session/JWT-issuance state |
+| Product / Category / Coupon / user account / WarehouseStock | kart-product-service / kart-category-service / kart-offer-service / kart-identity-service / kart-inventory-service | `AdminAction.entityId` references each by opaque id only; every mutation is a synchronous proxy call to that owning service's own write API (ADR-0010 Decision 2), never a locally-modeled copy |
