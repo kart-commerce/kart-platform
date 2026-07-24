@@ -313,3 +313,29 @@ Every term is owned by exactly **one** bounded context. Other contexts reference
 | WishlistPriceAlertTriggered | kart-wishlist-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 3); Notification never models Wishlist's own `WishlistEntry` aggregate |
 | UserRegistered | kart-identity-service | Consumed only as a `NotificationAttempt` creation trigger (Tier 2, welcome email); independently also consumed by `kart-user-service`, no ordering dependency between the two consumers |
 | UserNotificationPreferenceUpdated | kart-user-service | Consumed only as the sole `NotificationPreference` creation/update trigger; Notification never models User's own coarse `notificationOptIn` field or `UserProfile` aggregate |
+
+## Owned by `kart-review-service`
+
+| Term | Definition | Kind |
+|---|---|---|
+| Review | The single authoritative write-model record of one customer's opinion of one `(orderId, sku)` pair — submission, edit, retraction, and moderation outcome all resolve onto this one row | Aggregate root |
+| ReviewId | The stable identifier assigned to a Review at insert time; referenced by `ReviewSubmitted`'s payload and by `ProductRating`'s own idempotency ledger | Value object |
+| Rating | A `1..5` integer star value (engineering default — no BRD-stated scale, `ddd-model.md`) | Value object |
+| ModerationStatus | `PendingModeration \| Published \| Rejected \| Retracted` — the two-stage-moderation lifecycle state of a Review; `Rejected`/`Retracted` are both terminal, no transition exists between them | Value object |
+| PendingRevision | The staged `{newBodyText, newRating, submittedAt}` content of an edit submitted against an already-`Published` Review, held until the classifier/moderator clears or rejects it, leaving the currently-public content untouched in the meantime | Value object |
+| ProductRating | The canonical rating aggregate (`avg`/`count`) Review owns per [ADR-0014](../adr/0014-review-rating-aggregate-ownership.md), keyed by `Sku`; every other bounded context's own rating copy is a denormalized projection of this aggregate's own event stream | Aggregate root |
+| RatingAverage | The current `avg` on a `ProductRating`, maintained by weighted incremental adjustment, never a full recompute | Value object |
+| RatingCount | The current `count` on a `ProductRating` | Value object |
+| ProcessedReviewLedger | The `(orderId, sku) -> lastAppliedRating` idempotency ledger a `ProductRating` uses to dedupe `ReviewSubmitted`/`ReviewUpdated`/`ReviewUnpublished` under at-least-once redelivery | Value object |
+| VerifiedPurchaseRecord | The local, `orderId`-keyed lookup projection (not an aggregate) `POST /reviews`'s hard eligibility gate reads synchronously; populated by consuming `OrderCreated` (`userId`, `skus`) and `OrderDelivered` (`deliveredAt`) — two events, not one, since `OrderDelivered` alone does not carry `userId`/`sku` (`ddd-model.md`'s opening note) | Lookup projection |
+| ReviewSubmitted | Domain event (existing BRD §10 event, expanded payload per requirement-spec §6 Q5: `orderId, sku, rating, reviewId, userId`): fires exactly once per Review, the first time it ever becomes publicly visible | Domain event |
+| ReviewUpdated | Domain event (new, requirement-spec §6 Q3; payload `orderId, sku, oldRating, newRating`): fires for a rating-affecting change to a Review that was already public before the change; retry/DLQ tier not yet finalized (flagged for Event Design Agent) | Domain event |
+| ReviewUnpublished | Domain event (new, introduced at the DDD Agent stage): fires when a previously-public Review stops being public — author retraction or moderator post-hoc takedown, one event reused across both triggers; payload `orderId, sku, rating, reviewId, userId, reason`; retry/DLQ tier not yet finalized (flagged for Event Design Agent) | Domain event |
+
+## Referenced (owned elsewhere — accessed via ACL, not redefined here)
+
+| Term | Owning Context | How `kart-review-service` uses it |
+|---|---|---|
+| UserId | kart-identity-service | `Review.userId` and `VerifiedPurchaseRecord.userId` are reference fields only; Review never models Identity's own account/credential aggregate |
+| Order / OrderId / OrderCreated / OrderDelivered | kart-order-service | `Review.orderId`/`VerifiedPurchaseRecord.orderId` are reference fields only; `OrderCreated` and `OrderDelivered` are consumed only to populate `VerifiedPurchaseRecord`'s eligibility projection — Review never models Order's own Saga/state machine |
+| Sku | kart-product-service | `Review.sku`/`ProductRating.sku` are reference fields only; Review never models Product's own catalog aggregate |

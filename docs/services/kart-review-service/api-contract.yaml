@@ -1,0 +1,403 @@
+# doc_type: api-contract
+# service: kart-review-service
+# status: approved (no prior published contract to break — first issue)
+# generated_by: api-design-agent
+# source: docs/services/kart-review-service/ddd-model.md, docs/services/kart-review-service/architecture.md,
+#   docs/services/kart-review-service/requirement-spec.md, docs/services/kart-review-service/design-decisions.md,
+#   docs/adr/0014-review-rating-aggregate-ownership.md, docs/adr/0005-unify-order-terminal-event.md,
+#   docs/adr/0021-review-verified-purchase-order-created-dependency.md
+#
+# Every service starts at /v1 (kart-conventions.md's API Versioning section). `Idempotency-Key` is
+# mandatory on `POST /reviews` and `PATCH /reviews/{id}` — Review is not money-moving, but
+# design-decisions.md's Idempotency Mechanism decision generalizes api-standards.md's
+# money-moving-POST rule to any non-retry-safe write, and applies it here alongside the
+# independent `(order_id, sku)` unique constraint (both layers, not either alone). Publishing a
+# stable copy to a shared-contracts repo (kart-shared) is deferred until that repo exists in this
+# pipeline's scope.
+
+openapi: 3.0.3
+info:
+  title: kart-review-service API
+  version: 1.0.0
+  description: >
+    Review authorship (submission, edit, retraction), the two-stage moderation workflow, and a
+    read surface for the canonical rating aggregate (`ProductRating`, ADR-0014). `POST /reviews`
+    and `PATCH /reviews/{id}` decide their outcome synchronously within the request (verified-
+    purchase gate, then the synchronous automated content-safety classifier, ≤120ms sub-budget
+    within the overall P95 < 300ms write-path target, architecture.md) — there is no further
+    async step for the caller to poll; defer-until-outcome (design-decisions.md) means only
+    already-publicly-visible content is ever reflected in the read model or the rating aggregate.
+
+servers:
+  - url: https://api.kart.example/reviews
+    description: >
+      Public API Gateway. Serves the client-facing surface — `/v1/reviews`,
+      `/v1/reviews/{id}`, `/v1/product-ratings/{sku}` — and the Support/Admin console's
+      `/v1/reviews/{id}/moderate` (BRD §24.1's RBAC check on top of the same gateway-issued
+      bearer token, not a separate internal network segment; requirement-spec §3).
+
+paths:
+  /v1/reviews:
+    post:
+      operationId: submitReview
+      summary: Submit a review for a delivered order/SKU.
+      description: >
+        Rejected unless `VerifiedPurchaseRecord` shows this `(orderId, sku)` pair as delivered to
+        the authenticated caller (ddd-model.md's Verified-purchase gate invariant; design-
+        decisions.md's Cross-Service Verified-Purchase Check decision — checked synchronously
+        against Review's own local projection, never a live call to Order). Runs the synchronous
+        automated content-safety classifier next; content the classifier clears is inserted as
+        `Published` and fires `ReviewSubmitted` in the same transaction, content it flags (or a
+        classifier timeout/open-circuit, fail-safe) is inserted as `PendingModeration` with no
+        read-model write and no event (defer-until-outcome). `userId` is the authenticated
+        caller's identity — never taken from the request body. A retried request reusing the same
+        `Idempotency-Key` returns the original review's representation; the independent
+        `(order_id, sku)` unique constraint separately catches a duplicate submission arriving
+        without a matching key.
+      security:
+        - bearerAuth: [customer]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+          description: >
+            Deduplicated via a dedup store keyed on this value, plus the independent
+            `(order_id, sku)` unique constraint as a second layer (design-decisions.md's
+            Idempotency Mechanism decision — both, not either alone).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, sku, rating, bodyText]
+              properties:
+                orderId: { type: string, format: uuid }
+                sku: { type: string }
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                bodyText: { type: string }
+      responses:
+        '201':
+          description: >
+            Review row inserted (status reflects the classifier's synchronous decision —
+            `Published` or `PendingModeration`). `ReviewSubmitted` fires iff this transition set
+            `firstPublishedAt` for the first time (i.e. status is `Published`); no event fires for
+            a `PendingModeration` insert (ddd-model.md's `firstPublishedAt` invariant).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewView' }
+        '409':
+          description: >
+            One of: (a) no `VerifiedPurchaseRecord` exists yet for this `(orderId, sku, userId)`,
+            or its `deliveredAt` is still null — "no matching delivered order found yet, try again
+            shortly" (requirement-spec §6 Q2's exact wording; this is a temporary, retry-later
+            condition, not a permanent rejection of the request as submitted), or (b) a `Review`
+            already exists for this `(order_id, sku)` pair (the independent uniqueness invariant —
+            the client should use `PATCH /reviews/{id}` to revise instead of retrying this call).
+            The response body's `code` field distinguishes which.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: "Same `Idempotency-Key` reused with a materially different request body."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    get:
+      operationId: listReviews
+      summary: List published reviews for a SKU (read model).
+      description: >
+        Served from the MongoDB read model (BRD §5.4). Excludes `PendingModeration` (never yet
+        publicly visible) and `Retracted` (soft-removed) reviews; a `Rejected` post-hoc takedown
+        of previously-`Published` content is likewise excluded from this point forward
+        (ddd-model.md's `firstPublishedAt`/visibility invariants). P95 < 150ms, P99 < 400ms
+        (architecture.md).
+      parameters:
+        - name: sku
+          in: query
+          required: true
+          schema: { type: string }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewListView' }
+
+  /v1/reviews/{id}:
+    patch:
+      operationId: editReview
+      summary: Author-only edit within the 30-day edit window.
+      description: >
+        Legal only within 30 days of `createdAt` (not of the last edit) and only by the review's
+        own author; immutable outside the window via this endpoint (a moderator's
+        `PATCH /reviews/{id}/moderate` action is never time-boxed by this window). Re-runs the
+        synchronous classifier against the new content. Outcome depends on the review's current
+        state (ddd-model.md's Defer-until-outcome invariant, generalized to edits):
+          - Currently `PendingModeration` or `Rejected` (nothing public to protect) — content is
+            overwritten in place, the classifier re-runs, and the same create-path branching
+            applies (`Published` immediately if cleared, stays `PendingModeration` if flagged).
+          - Currently `Published`, cleared by the classifier — applied immediately in place,
+            fires `ReviewUpdated`.
+          - Currently `Published`, flagged by the classifier — staged as `pendingRevision`; the
+            currently-`Published` content is left untouched and visible until a moderator decides
+            (`PATCH /reviews/{id}/moderate`); no event fires yet.
+        A second edit submitted while one revision is already staged overwrites that staged
+        revision (latest-edit-wins, not a queue) rather than creating a second one.
+      security:
+        - bearerAuth: [customer]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                bodyText: { type: string }
+      responses:
+        '200':
+          description: >
+            Updated review representation. If the edit was staged (`Published` + classifier
+            flagged), `status` remains `Published` and `pendingRevision` is populated with the
+            staged content awaiting a moderator decision; otherwise the edit is reflected directly
+            in `rating`/`bodyText`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewView' }
+        '403':
+          description: Caller is not this review's author.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: >
+            Either (a) more than 30 days have elapsed since `createdAt` — the edit window has
+            closed and the review is immutable via this endpoint (only a moderator action can
+            still change it), or (b) the review is `Retracted` — a terminal state with no legal
+            transition out of it (ddd-model.md's Monotonic terminal states invariant). The
+            response body's `code` field distinguishes which.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: "Same `Idempotency-Key` reused with a materially different request body."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+    delete:
+      operationId: retractReview
+      summary: Author-only soft-retract, any time, from any non-Retracted status.
+      description: >
+        Soft-delete only — the row is never hard-deleted (requirement-spec §4). Transitions to
+        `Retracted` (terminal, no path back) and fires `ReviewUnpublished` iff `firstPublishedAt`
+        was already set (i.e. the review was ever actually public) — never for a
+        `PendingModeration`/`Rejected` review that was never published. A repeat retraction
+        against an already-`Retracted` review is a guarded no-op (safe to retry without an
+        `Idempotency-Key` — this action has no non-idempotent side effect to double-apply).
+      security:
+        - bearerAuth: [customer]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: "Retraction applied (or recognized as an already-retracted no-op)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewView' }
+        '403':
+          description: Caller is not this review's author.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/reviews/{id}/moderate:
+    patch:
+      operationId: moderateReview
+      summary: Moderator accept/reject on a queued or already-live review.
+      description: >
+        RBAC-gated to the Support Agent or Admin role (BRD §24.1, requirement-spec §3) — the
+        platform's existing role model, no Review-specific role table. One endpoint covers three
+        distinct contexts, resolved by the review's current state (ddd-model.md's
+        Defer-until-outcome invariant):
+          - `PendingModeration`, action `accept` — transitions to `Published`, sets
+            `firstPublishedAt` if unset, fires `ReviewSubmitted`.
+          - `PendingModeration`, action `reject` — transitions to `Rejected` (terminal); no event
+            (never publicly visible).
+          - `Published` with a staged `pendingRevision`, action `accept` — applies the staged
+            content in place, clears `pendingRevision`, fires `ReviewUpdated`.
+          - `Published` with a staged `pendingRevision`, action `reject` — discards the staged
+            revision; `Published` content unchanged; no event (edge-cases.md's
+            "Moderation-rejection racing," dissolved by construction).
+          - `Published`, no staged revision, action `reject` — a post-hoc takedown of already-live
+            content (edge-cases.md's "Abusive content" mitigation, no expiry); transitions to
+            `Rejected` and **does** fire `ReviewUnpublished` (reason `ModeratorTakedown`), because
+            this content was actually counted while live.
+        A repeat moderator action against an already-resolved review (or `Retracted`) is a guarded
+        no-op, never re-applied.
+      security:
+        - bearerAuth: [support_agent, admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [accept, reject] }
+                reason:
+                  type: string
+                  description: "Optional audit note, most relevant for a post-hoc takedown (reject on an already-Published review with no staged revision)."
+      responses:
+        '200':
+          description: Moderation decision applied (or recognized as an already-resolved no-op).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewView' }
+        '403':
+          description: Caller does not hold the Support Agent or Admin role.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: "The review is `Retracted` — terminal, no moderator action is legal against it."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/product-ratings/{sku}:
+    get:
+      operationId: getProductRatingSummary
+      summary: Read the canonical rating aggregate (avg/count) for a SKU.
+      description: >
+        Not a BRD-stated endpoint — this is the read surface ADR-0014 explicitly deferred to this
+        stage ("exposed via Review's own read surface — `GET /reviews/{sku}/summary` or
+        equivalent, final shape is the API Design Agent's job"). Named `/v1/product-ratings/{sku}`
+        rather than nesting under `/v1/reviews/{sku}/summary` to avoid colliding with
+        `/v1/reviews/{id}`'s `id` path parameter, which is a `reviewId`, not a `sku`. Serves
+        `ProductRating` — Review's canonical system-of-record aggregate (`avg`, `count`), updated
+        asynchronously off Review's own `ReviewSubmitted`/`ReviewUpdated`/`ReviewUnpublished`
+        events (ddd-model.md) — distinct from Product's/Search's own denormalized copies, which
+        each maintain their own independent projection of the same event stream and do not read
+        this endpoint synchronously (ADR-0014).
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProductRatingView' }
+        '404':
+          description: "No published review exists yet for this SKU — no `ProductRating` row to return."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Identity-issued token. `customer` scope identifies the author (`userId` is read from the
+        token, never from the request body); `support_agent`/`admin` scopes gate
+        `PATCH /reviews/{id}/moderate` (BRD §24.1, requirement-spec §3).
+
+  schemas:
+    Problem:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        timestamp: { type: string, format: date-time }
+
+    PendingRevisionView:
+      type: object
+      required: [newBodyText, newRating, submittedAt]
+      properties:
+        newBodyText: { type: string }
+        newRating: { type: integer, minimum: 1, maximum: 5 }
+        submittedAt: { type: string, format: date-time }
+
+    ReviewView:
+      type: object
+      required: [reviewId, orderId, sku, userId, rating, bodyText, status, createdAt, lastEditedAt]
+      properties:
+        reviewId: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        sku: { type: string }
+        userId: { type: string, format: uuid }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        bodyText: { type: string }
+        status:
+          type: string
+          enum: [PendingModeration, Published, Rejected, Retracted]
+          description: ddd-model.md's ModerationStatus value object — the full legal-transition graph is documented there, not re-derived here.
+        pendingRevision:
+          allOf: [{ $ref: '#/components/schemas/PendingRevisionView' }]
+          nullable: true
+          description: "Set only when the current Published content has a staged, not-yet-decided edit awaiting a moderator (ddd-model.md's PendingRevision value object)."
+        firstPublishedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        lastEditedAt: { type: string, format: date-time }
+        retractedAt: { type: string, format: date-time, nullable: true }
+
+    ReviewListView:
+      type: object
+      required: [items, page, pageSize, totalCount]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ReviewView' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        totalCount: { type: integer }
+
+    ProductRatingView:
+      type: object
+      required: [sku, avg, count]
+      properties:
+        sku: { type: string }
+        avg: { type: number, description: "Current weighted running average (ddd-model.md's RatingAverage), never a full recompute per request." }
+        count: { type: integer }

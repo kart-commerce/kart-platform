@@ -1,7 +1,7 @@
 ---
 doc_type: design-decisions
 service: kart-review-service
-status: pending-approval
+status: approved
 generated_by: design-decision-agent
 source: docs/services/kart-review-service/requirement-spec.md, docs/services/kart-review-service/edge-cases.md
 ---
@@ -52,3 +52,8 @@ source: docs/services/kart-review-service/requirement-spec.md, docs/services/kar
   - Chosen: defer-until-outcome, generalized from the fix already adopted for the "moderation-rejection racing" edge case into Review's standing rule for any side-effect (read-model write, aggregate update, or event publication) gated by moderation status.
   - Why: eliminates an entire class of reversal/compensation logic and the new moderation-outcome event that publish-and-compensate or reserve/commit would require, at no added cost beyond what the moderation-workflow decision (design-decision above, requirement-spec §6 Q1) already accepted — since only the flagged minority is ever delayed, deferring costs nothing for the majority of submissions.
   - Trade-off accepted: none beyond what the moderation-workflow decision already accepts (queue latency for flagged content only) — stated here as a generalization to future side-effects, not a new cost.
+
+## Sign-off
+
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to Architecture Agent

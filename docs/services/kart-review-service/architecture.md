@@ -1,7 +1,7 @@
 ---
 doc_type: architecture
 service: kart-review-service
-status: pending-approval
+status: approved
 generated_by: architecture-agent
 source: docs/services/kart-review-service/requirement-spec.md, docs/services/kart-review-service/edge-cases.md, docs/services/kart-review-service/design-decisions.md
 ---
@@ -27,7 +27,8 @@ This matters for availability posture: Review can be briefly degraded or unavail
 |---|---|---|---|---|
 | Inbound (client) | Client/Storefront via API Gateway | `POST /reviews`, `GET /reviews?sku=...`, `PATCH /reviews/{id}`, `DELETE /reviews/{id}` | **Sync** (REST) | Submission/read/edit/retract surface (requirement-spec §5). Write path budget: P95 < 300ms; read path: P95 < 150ms/P99 < 400ms. |
 | Inbound (client, back-office) | Support/Admin console via API Gateway | `PATCH /reviews/{id}/moderate` | **Sync** (REST) | Moderator accept/reject on a queued flagged review; RBAC-gated to Support Agent/Admin role (BRD §24.1, requirement-spec §3) |
-| Inbound (consumed) | Order Service | `OrderDelivered` event | **Async** | Published by Order per ADR-0005 (`orderId, deliveredAt`; 3x retry, `order.dlq` — Order's own tier). Review projects this into its own materialized `(customerId, orderId, sku)` delivered-order record (event-carried state transfer — see design-decisions.md's "Cross-Service Verified-Purchase Check" decision). `POST /reviews`'s hard eligibility gate (requirement-spec §4 Domain Invariant) checks **only** against this local copy — never a live call back to Order. |
+| Inbound (consumed) | Order Service | `OrderCreated` event | **Async** | Published by Order (`orderId, userId, items, total`; Order's own retry tier). Per [ADR-0021](../../adr/0021-review-verified-purchase-order-created-dependency.md), Review consumes this to seed `VerifiedPurchaseRecord`'s `userId`/`skus` fields — `OrderDelivered` alone (below) does not carry either field. |
+| Inbound (consumed) | Order Service | `OrderDelivered` event | **Async** | Published by Order per ADR-0005 (`orderId, deliveredAt`; 5x exponential, paged on-call, `order.order-delivered.dlq` — Order's own tier, elevated per `kart-order-service/event-contract.md`'s own criticality justification since a stuck signal blocks Review's verified-purchase gate indefinitely). Review projects this, together with `OrderCreated` above (ADR-0021), into its own materialized `VerifiedPurchaseRecord` (keyed on `orderId`; event-carried state transfer — see design-decisions.md's "Cross-Service Verified-Purchase Check" decision). `POST /reviews`'s hard eligibility gate (requirement-spec §4 Domain Invariant) checks **only** against this local copy — never a live call back to Order. |
 | Outbound (published) | Product | `ReviewSubmitted` event | **Async** | 2x retry, `review.dlq` (BRD §10). Payload: `orderId, sku, rating, reviewId, userId` (requirement-spec §6 Q5 — expanded from the BRD's original 3 fields). Consumed for Product's denormalized `ratingSummary` recalc per ADR-0014 — not a second canonical aggregate. |
 | Outbound (published) | Analytics | `ReviewSubmitted` event | **Async** | Same event/tier as above; Analytics is a full fan-in consumer of every platform event per ADR-0004, not a Review-specific integration. |
 | Outbound (published) | `kart-search-service` | `ReviewSubmitted` event | **Async** | Same event/tier as above; confirmed by [ADR-0018](../../adr/0018-search-catalog-signal-sourcing.md) — Search maintains its own denormalized ranking-signal projection, the identical "second independent reader of this stream" pattern ADR-0014 already established for Product's `ratingSummary`. Search's own consumer-side DLQ (`search.review-submitted.dlq`) is that service's own call, per `kart-search-service/event-contract.md`. |
@@ -54,5 +55,5 @@ Requirement-spec §3 carried forward, as a non-blocking Architecture Agent conce
 
 ## Sign-off
 
-- [ ] Reviewed by:
-- [ ] Approved to proceed to DDD Agent
+- [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner
+- [x] Approved to proceed to DDD Agent
