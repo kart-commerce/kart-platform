@@ -1198,6 +1198,8 @@ graph LR
 | **Redis** | Cache-aside for reads, write-through for pricing/promo; key convention `service:entity:id[:shard]` |
 | **MongoDB** | Denormalized read models; shard key chosen for even distribution + query locality, documented in Database Memory |
 | **PostgreSQL** | Range partitioning for high-volume time-series tables (orders, events); explicit index rationale documented per table |
+| **Data Access (ORM)** | EF Core (`Npgsql.EntityFrameworkCore.PostgreSQL`) is mandatory everywhere for Postgres access, no substitutions without an ADR; LINQ is the default query style; `DbContext` is the Unit of Work, no separate UoW abstraction on top of it; Dapper permitted only as a targeted escape hatch for read-heavy/reporting raw SQL, never as the default |
+| **Repository Pattern** | One repository per Aggregate Root only, never generic per-entity/per-table repositories; repository's sole job is enforcing that persistence only happens through the aggregate boundary (load/save the whole aggregate, matches the DDD "aggregates never span a DB transaction boundary" rule) |
 | **Docker** | Multi-stage builds mandatory; final image on minimal runtime base; dependency layer cached separately from source layer |
 | **Kubernetes** | HPA on custom metrics (queue depth) where consumer-driven, not just CPU; ConfigMap for non-secret config, Secret for credentials |
 | **Git** | Trunk-based with short-lived feature branches; no direct commits to `main` |
