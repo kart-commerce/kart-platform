@@ -1,0 +1,229 @@
+{
+  "$schema_note": "Machine-readable source of truth for docs/DEVELOPMENT_PLAN.md. scripts/release.sh reads this file. If you change a release's scope here, update DEVELOPMENT_PLAN.md's table in the same commit -- they must never silently diverge.",
+  "releases": [
+    {
+      "number": 0,
+      "slug": "platform-bootstrap",
+      "theme": "Platform Bootstrap (prerequisite, not a customer-facing release)",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-shared", "tickets": null, "note": "versioned event schemas + OpenAPI contracts + common libs" },
+        { "service": "kart-infra", "tickets": null, "note": "Terraform/Helm/K8s cluster bootstrap" },
+        { "service": "kart-devops", "tickets": null, "note": "reusable CI/CD workflows" },
+        { "service": "kart-api-gateway", "tickets": null, "note": "gateway skeleton + routing config" }
+      ],
+      "frontend": [
+        "kart-web repo shell + @kart/design-system integration",
+        "kart-admin-web repo shell + @kart/design-system integration",
+        "Generated-API-client tooling (openapi-generator-cli wired into CI)"
+      ],
+      "load_test": { "tier": "none", "rpm": "n/a", "focus": "Nothing deployed yet -- no service exists to load test." },
+      "milestone": "A hello-world service can be scaffolded, built, containerized, and deployed to a local/staging k8s cluster via the shared pipeline.",
+      "top_mistakes": [
+        "Letting kart-shared become a dumping ground for domain logic instead of only versioned contracts + generic libs (PLATFORM_BLUEPRINT.md §2.2 item 3)",
+        "Hardcoding CI steps per service instead of calling kart-devops's reusable workflow_call -- guarantees drift across 18 repos later",
+        "Skipping branch protection / required PR review on kart-shared's main -- it is the one repo every other repo depends on as a package"
+      ]
+    },
+    {
+      "number": 1,
+      "slug": "identity-navigation",
+      "theme": "Identity & Navigation Foundation",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-identity-service", "tickets": 26 },
+        { "service": "kart-category-service", "tickets": 6 }
+      ],
+      "frontend": [
+        "Auth flows (login/register/MFA/SSO/password-reset) in kart-web and kart-admin-web",
+        "Category navigation (mocked, then wired to real endpoint)"
+      ],
+      "load_test": { "tier": "Medium", "rpm": "100,000", "focus": "Identity sits on every authenticated request path platform-wide -- this is not optional even at MVP scale." },
+      "milestone": "A user can register/log in; site navigation renders real categories.",
+      "top_mistakes": [
+        "Storing refresh tokens or session state in a way the API Gateway's revocation-list Redis check can't see (breaks logout/role-change/lock instantly)",
+        "Skipping the JIT-provisioning / external-IdP role-mapping edge cases -- these are resolved decisions in edge-cases.md, not open questions to improvise at code time",
+        "Treating MFA/SSO as a Phase 2 add-on and shipping password-only auth first -- BRD §24.2 already scopes it into this service, retrofitting RBAC later is expensive"
+      ]
+    },
+    {
+      "number": 2,
+      "slug": "catalog-stock-core",
+      "theme": "Catalog & Stock Core",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-inventory-service", "tickets": 8 },
+        { "service": "kart-delivery-tracking-service", "tickets": 8 },
+        { "service": "kart-product-service", "tickets": 7 }
+      ],
+      "frontend": [
+        "PLP/PDP browsing (product cards, category pages wired to real data)",
+        "Stock/availability display"
+      ],
+      "load_test": { "tier": "High", "rpm": "1,000,000", "focus": "Inventory is the platform's highest-contention service (SELECT ... FOR UPDATE hot path) -- give it the longest hardening runway now, don't defer to Release 5." },
+      "milestone": "Browse the full catalog with real stock status.",
+      "top_mistakes": [
+        "Testing the oversell-prevention lock only at low concurrency -- the race only reproduces under real concurrent load, run the High-tier test before calling this release done",
+        "Forgetting the Product/Variant aggregate transaction-boundary split documented in ddd-model.md and collapsing them into one aggregate for convenience",
+        "Skipping the replenishment-racing-an-active-reservation edge case -- it's a named, resolved edge case, not a hypothetical"
+      ]
+    },
+    {
+      "number": 3,
+      "slug": "discovery-pricing-account",
+      "theme": "Discovery, Pricing & Account",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-user-service", "tickets": 11 },
+        { "service": "kart-search-service", "tickets": 13 },
+        { "service": "kart-offer-service", "tickets": 13 }
+      ],
+      "frontend": [
+        "Search bar/results/facets",
+        "Pricing & promo badges on PDP/PLP",
+        "Coupon input at cart",
+        "Profile/address book"
+      ],
+      "load_test": { "tier": "Medium", "rpm": "100,000", "focus": "Search (read-heavy, 20:1 read:write per BRD §4.4) and Offer's pricing-quote path (documented hot read path) both need Medium-tier verification before GA." },
+      "milestone": "Search works, prices/promos are real, users manage their profile.",
+      "top_mistakes": [
+        "Cache-invalidating pricing/promo flags on a TTL instead of write-through (BRD §16 explicitly mandates write-through for price-sensitive data -- this exact mistake was caught and fixed once already in kart-offer-service's own edge-cases.md)",
+        "Reusing an expired PricingQuote snapshot across a slow checkout instead of enforcing its TTL",
+        "Rebuilding the Search index in place instead of blue-green -- a live reindex-in-place will serve inconsistent facets mid-rebuild"
+      ]
+    },
+    {
+      "number": 4,
+      "slug": "cart-wishlist",
+      "theme": "Cart & Wishlist",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-wishlist-service", "tickets": 9 },
+        { "service": "kart-cart-service", "tickets": 10 }
+      ],
+      "frontend": [
+        "Cart page (add/remove/merge-on-login)",
+        "Wishlist page",
+        "Price-drop alert UI hooks"
+      ],
+      "load_test": { "tier": "High", "rpm": "1,000,000", "focus": "Cart sits immediately upstream of the money path -- verify it holds up before Release 5 depends on it." },
+      "milestone": "The full pre-checkout shopping experience works end-to-end.",
+      "top_mistakes": [
+        "Making the lazy stock/price validation gRPC call a hard gate on checkout initiation instead of fail-open with circuit breaker (architecture.md is explicit: never a hard gate)",
+        "Losing the sum-on-overlap / union-on-distinct cart-merge rule on login and silently picking one behavior",
+        "Forgetting the UserDataErased hard-delete responsibility for Cart and Wishlist (ADR-0016 names both directly) -- a GDPR gap here is a compliance bug, not a nice-to-have"
+      ]
+    },
+    {
+      "number": 5,
+      "slug": "money-path-order-saga",
+      "theme": "Money Path: Checkout, Payment, Order Saga",
+      "status": "planned",
+      "priority": "highest-priority gate in the entire plan -- do not compress this release to hit a date",
+      "backend": [
+        { "service": "kart-payment-service", "tickets": 11 },
+        { "service": "kart-order-service", "tickets": 20, "note": "the Saga orchestrator" }
+      ],
+      "frontend": [
+        "Full checkout flow (kart-web/checkout-and-refunds.md)",
+        "Order confirmation",
+        "Order history/detail",
+        "Refund-initiation UI"
+      ],
+      "load_test": {
+        "tier": "High -> Extreme",
+        "rpm": "1,000,000 then 10,000,000+",
+        "focus": "Full Order Saga end-to-end (Order -> Inventory reserve -> Payment charge -> confirm) at High tier, then the full BRD §26 chaos suite (kill an Order pod mid-request, saturate RabbitMQ queue depth, introduce PostgreSQL replica lag, drop 20% inter-service packets), then an Extreme-tier flash-sale breaking-point test."
+      },
+      "milestone": "MVP-complete: a customer can actually buy something, and the order-critical-path is hardened for flash-sale scale.",
+      "top_mistakes": [
+        "Missing or incorrect Idempotency-Key handling on POST /payments/charge or POST /orders -- the single most expensive mistake on this path (double-charge / duplicate-order risk under client or gateway retry)",
+        "Treating the Saga as roll-forward-only and skipping the compensation path (Inventory release, Payment refund) -- test the failure flow (BRD §12.2) as thoroughly as the success flow (§12.1), not as an afterthought",
+        "Deploying Order before Payment's and Inventory's real contracts are live in the same environment, not just 'approved' on paper",
+        "Running the chaos suite against Production instead of Staging by accident -- confirm target environment before every chaos experiment",
+        "Calling this release done after only the happy-path load test -- the Extreme-tier breaking-point test is not optional here, it is the entire point of this release existing"
+      ]
+    },
+    {
+      "number": 6,
+      "slug": "fulfillment-visibility",
+      "theme": "Fulfillment Visibility",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-shipping-service", "tickets": 16 },
+        { "service": "kart-notification-service", "tickets": 16 }
+      ],
+      "frontend": [
+        "Shipment tracking UI",
+        "Notification preference center",
+        "Transactional email/SMS/push wiring"
+      ],
+      "load_test": { "tier": "High", "rpm": "1,000,000", "focus": "Notification is the platform's broadest fan-in consumer -- verify consumer autoscaling under full event fan-in volume, not just the happy path." },
+      "milestone": "Orders ship, track, and notify automatically.",
+      "top_mistakes": [
+        "Skipping the DLQ/retry-tier verification for Notification's nine-plus consumed event types -- a silently-dropped notification is invisible until a customer complains",
+        "Not testing the carrier-webhook duplicate-delivery and out-of-order-delivery edge cases before going live (both are named, resolved edge cases in delivery-tracking-service)",
+        "Letting the per-carrier circuit breaker share a bulkhead with other carriers -- one carrier's outage should never degrade another carrier's shipments"
+      ]
+    },
+    {
+      "number": 7,
+      "slug": "post-purchase-engagement",
+      "theme": "Post-purchase Engagement",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-review-service", "tickets": 21 },
+        { "service": "kart-recommendation-service", "tickets": 13 }
+      ],
+      "frontend": [
+        "Review submit/display/moderation-visible state",
+        "Recommendation widgets (home, PDP, post-purchase)"
+      ],
+      "load_test": { "tier": "Medium", "rpm": "100,000", "focus": "Explicitly verify Recommendation's fail-open degrade behavior under load -- its own architecture.md flags a distributed-monolith risk if this isn't tested, not just its happy path." },
+      "milestone": "The engagement loop is complete.",
+      "top_mistakes": [
+        "Letting Recommendation's synchronous Inventory/Product availability-filter calls become a hard dependency instead of degrading gracefully on timeout",
+        "Missing the duplicate-review-submission-for-the-same-delivered-order edge case (named, resolved) and allowing double reviews",
+        "Racing a moderation rejection against an already-updated rating average without the documented resolution order"
+      ]
+    },
+    {
+      "number": 8,
+      "slug": "admin-analytics",
+      "theme": "Admin & Analytics",
+      "status": "planned",
+      "backend": [
+        { "service": "kart-admin-service", "tickets": 22 },
+        { "service": "kart-analytics-service", "tickets": 17 }
+      ],
+      "frontend": [
+        "kart-admin-web full build-out: RBAC-gated dashboards, catalog/coupon/user-management consoles, analytics dashboards/funnels"
+      ],
+      "load_test": { "tier": "High", "rpm": "1,000,000", "focus": "Analytics consumes every event published by every other service simultaneously (ADR-0004) -- this is the true full-fan-in stress test." },
+      "milestone": "Back office complete, full observability across the platform.",
+      "top_mistakes": [
+        "Letting Admin own a parallel authorization/role table instead of consuming Identity-issued claims (this exact mistake was caught and fixed once already, see services/README.md's gap-closure table)",
+        "One of Admin's five synchronous fan-out dependencies (Product/Category/Offer/Identity/Inventory) missing its own independent circuit breaker, letting one dependency's outage cascade into another",
+        "Redacting PII in Analytics after ingestion instead of redact-in-place at the UserDataErased consumer -- a compliance gap, not a data-quality nice-to-have"
+      ]
+    },
+    {
+      "number": 9,
+      "slug": "ga-hardening",
+      "theme": "GA Hardening (final release, no new services)",
+      "status": "planned",
+      "backend": [],
+      "frontend": [
+        "Remove all remaining feature flags platform-wide",
+        "kart-web Lighthouse / Core Web Vitals / SEO audit"
+      ],
+      "load_test": { "tier": "Extreme", "rpm": "10,000,000+", "focus": "Full-system flash-sale simulation across the entire platform simultaneously (not just the Order path this time) + the full BRD §26 chaos suite run platform-wide." },
+      "milestone": "v1.0 / GA-ready.",
+      "top_mistakes": [
+        "Leaving a stale feature flag in code past its feature's 100% rollout (api-strategy.md's own explicit rule: delete the same or next sprint)",
+        "Treating the full-system Extreme test as 'we already tested Order in Release 5' -- concurrent load across all 18 services surfaces cross-service resource contention no single-path test can",
+        "Skipping the security/pen-test pass because 'each service already passed its own Security Review gate' -- a system-wide pass catches cross-service auth/authorization gaps individual passes structurally can't see"
+      ]
+    }
+  ]
+}
