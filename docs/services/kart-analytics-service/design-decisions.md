@@ -83,6 +83,16 @@ Cross-cutting technology/pattern choices this service's approved requirement-spe
 - Numeric ingestion-lag and dashboard-query latency budgets — requirement-spec §6 item 6 explicitly carries these forward, non-blocking, to the Architecture Agent for human sign-off.
 - Warehouse/table schema and retention-tiering implementation — requirement-spec §6 item 3 (D3) already fixes the policy (30-day Kafka retention, indefinite raw-layer retention); the schema/table shape itself is the Database Design Agent's job.
 
+## Decision: Global Exception Handling & Consistent Response Model
+
+**Decision:** A single global exception-handling middleware (ASP.NET Core `IExceptionHandler`/`UseExceptionHandler`) is the only place this service catches and translates unhandled exceptions into an HTTP response — no `Handler`/controller/domain code wraps business logic in try/catch purely to log-and-rethrow or log-and-return an error. Every error response (validation failure or unhandled exception) is shaped as an RFC 7807 `ProblemDetails` envelope extended with the platform's standard fields (`traceId`, `errorCode`); every success response follows the same consistent envelope convention as every other Kart service. Both the middleware and the `ProblemDetails` factory are wired once via the shared `Kart.Shared.ErrorHandling` package, not reimplemented locally.
+
+**Options considered:**
+- Per-handler/controller try/catch translating exceptions to a response inline — rejected: duplicates translation logic per endpoint, risks inconsistent status-code/response-shape choices across handlers, and produces double-logging (or missed logging) when a local catch and the global handler both react to the same exception.
+- Platform-standard global exception handler + `Kart.Shared.ErrorHandling`-wired `ProblemDetails` envelope — adopted: one place to change the error shape platform-wide, and a response contract every client (web, admin, partner API) can parse identically regardless of which of the 18 services it's calling.
+
+**Why:** matches the same "one platform-wide implementation, not built locally by each service" pattern already applied to `Kart.Shared.Observability` and `Kart.Shared.Auditing` above — reimplementing exception translation per service is the identical per-service-drift failure mode those decisions already reject. Domain/business errors continue to use the Result/Either pattern (`agent-reusables/docs/standards/api-standards.md`) rather than exceptions; the global handler exists for the genuinely exceptional case (an unhandled infrastructure fault), and logs it exactly once — at `Error` level, tagged with `traceId`/`service` and this service's own primary correlation field named in its Observability & Instrumentation decision above — through the same Serilog/OTel pipeline, never a second, ad-hoc log line from a local catch block.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner (per `agent-reusables/agents/design-decision-agent.md`'s Human Approval Required gate).
