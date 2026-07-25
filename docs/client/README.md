@@ -19,18 +19,36 @@ Kart's own architecture already draws this line before this folder existed — [
 
 `Partner API Consumer` (BRD §24.1) is non-interactive (client-credentials only) and has no UI — no third client app is needed for it.
 
-**This is a documented engineering default, not a BRD-mandated split** — the BRD never states "two client apps" explicitly, but the actor/console distinction it already draws (§24, `system-context.md`) makes two apps the defensible reading, for the same reasons any two BRD services with materially different scaling/security/release-cadence profiles are never merged into one deployable. If this should be revisited, treat it as an ADR-worthy decision, not a silent edit here.
+**This is a documented engineering default, not a BRD-mandated split** — the BRD never states "two client apps" explicitly, but the actor/console distinction it already draws (§24, `system-context.md`) makes two apps the defensible reading, for the same reasons any two BRD services with materially different scaling/security/release-cadence profiles are never merged into one deployable. This is now formalized in [ADR-0022](../adr/0022-client-app-split-confirmation.md), with the full deployment/scaling/CI-CD/security implications — a future proposal to merge the two apps must supersede that ADR explicitly, not edit this file silently.
 
 ## Pipeline stage per app
 
 `kart-web` is the flagship, fully-specified app — it is what the BRD's own scale numbers (§3) and the platform's premium-ecommerce ambition are actually about. `kart-admin-web` is intentionally scoped lighter in this pass (internal tool, not the platform's showcase surface) — its own `requirement-spec.md` says so explicitly and can be expanded later without touching `kart-web`'s docs.
 
-| App | Requirement Spec | Architecture | Design Tokens | API Integration Map | Tickets |
-|---|---|---|---|---|---|
-| [`kart-web`](kart-web/) | [✅ drafted](kart-web/requirement-spec.md) | [✅ drafted](kart-web/architecture.md) | [✅ drafted](kart-web/design-tokens.md) | [✅ drafted](kart-web/api-integration-map.md) | — (not yet run) |
-| [`kart-admin-web`](kart-admin-web/) | [✅ drafted](kart-admin-web/requirement-spec.md) | [✅ drafted](kart-admin-web/architecture.md) | — (inherits `kart-web`'s brand tokens, see its architecture.md) | — (folded into architecture.md for now, scope is small) | — (not yet run) |
+| App | Requirement Spec | Architecture | Design Tokens | API Integration Map | Edge Cases | Design Decisions | Tickets |
+|---|---|---|---|---|---|---|---|
+| [`kart-web`](kart-web/) | [✅ drafted](kart-web/requirement-spec.md) | [✅ drafted](kart-web/architecture.md) | [✅ drafted](kart-web/design-tokens.md) | [✅ drafted](kart-web/api-integration-map.md) | [✅ drafted](kart-web/edge-cases.md) | [✅ drafted](kart-web/design-decisions.md) | [✅ drafted](kart-web/tickets.md) |
+| [`kart-admin-web`](kart-admin-web/) | [✅ drafted](kart-admin-web/requirement-spec.md) | [✅ drafted](kart-admin-web/architecture.md) | — (inherits `kart-web`'s brand tokens via `@kart/design-system`, see [`design-system.md`](design-system.md)) | — (folded into architecture.md, scope is small) | [✅ drafted](kart-admin-web/edge-cases.md) | [✅ drafted](kart-admin-web/design-decisions.md) | [✅ drafted](kart-admin-web/tickets.md) |
 
-Every doc below carries `status: pending-approval` in its frontmatter until a human reviews it — same convention as `docs/services/<name>/`, see [`AGENTS.md`](../../AGENTS.md) §2.
+### Cross-cutting documents (shared by both apps)
+
+| Document | Covers |
+|---|---|
+| [`localization.md`](localization.md) | Languages (en/bn/de), detection, persistence, runtime switching, currency (USD/BDT), exchange-rate strategy, order-currency locking, RTL policy |
+| [`security.md`](security.md) | Token handling, session-timeout policy (per-app, per-role concrete numbers), PCI DSS scope (SAQ A), OWASP ASVS Level 2 alignment |
+| [`privacy.md`](privacy.md) | Cookie consent (categories, banner, preference center, versioning, withdrawal), full GDPR rights (access/export/delete/rectify), audit logging |
+| [`design-system.md`](design-system.md) | The `@kart/design-system` shared npm package — how both apps consume tokens/components without sharing source, versioning, CI publishing, backward compatibility |
+| [`api-strategy.md`](api-strategy.md) | OpenAPI-generated clients, MSW mocking, mock fixtures, feature flags, API versioning, contract validation, the four-stage 🚧→✅ integration workflow |
+| [`approval-checklist.md`](approval-checklist.md) | Architecture / Security / Performance / Accessibility / Frontend-Readiness / Deployment-Readiness review checklists — overall client-tier approval status |
+
+### `kart-web`-specific documents (no SSR/SEO or checkout surface in `kart-admin-web`)
+
+| Document | Covers |
+|---|---|
+| [`kart-web/seo.md`](kart-web/seo.md) | Exact SSR/CSR page classification, meta tags, structured data, OpenGraph/Twitter cards, canonical URLs, sitemap, robots.txt, lazy hydration, TransferState, route-prerender policy |
+| [`kart-web/checkout-and-refunds.md`](kart-web/checkout-and-refunds.md) | Full checkout flow + the customer-initiated return/refund workflow (eligibility, auto-approval fast path, manual review, payment-gateway interaction, notifications, audit trail, fraud prevention) |
+
+Every doc below carries `status: pending-approval` in its frontmatter until a human reviews it — same convention as `docs/services/<name>/`, see [`AGENTS.md`](../../AGENTS.md) §2. See [`approval-checklist.md`](approval-checklist.md) for the consolidated sign-off status of the full client-tier documentation set.
 
 ## What each document type is
 

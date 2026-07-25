@@ -8,7 +8,7 @@ source: docs/client/kart-web/requirement-spec.md
 
 # Design Tokens: kart-web
 
-Concrete brand values layered on top of the *system* defined in `agent-reusables/docs/standards/frontend/design-system-standards.md` — that file owns the token categories, the theming mechanism, and the "no hardcoded values" rule; this file only owns Kart's actual numbers.
+Concrete brand values layered on top of the *system* defined in `agent-reusables/docs/standards/frontend/design-system-standards.md` — that file owns the token categories, the theming mechanism, and the "no hardcoded values" rule; this file only owns Kart's actual numbers. These values are the authoritative *content* spec that seeds `@kart/design-system`'s actual token JSON — [`../design-system.md`](../design-system.md) owns the *distribution* mechanism (the versioned package both `kart-web` and `kart-admin-web` consume); a token change is edited here and mirrored into that package's source, never hand-duplicated independently in either consuming app.
 
 **Flag before treating this as final:** the palette/typeface below is a **structurally-complete placeholder**, not a signed-off brand identity — actual brand color/logo/typeface choice is a marketing/design decision the BRD never makes and this doc doesn't invent on its behalf (per `AGENTS.md` §2's "business/product judgment call → ask the human" rule). What *is* settled here, as an engineering default: the token *shape* (names, scale steps, theme structure) — swapping the values below for a real brand kit later is a data change to this file, not a restructuring of any component that consumes it.
 
@@ -33,7 +33,8 @@ Every pair above must be re-verified for WCAG 2.2 AA contrast (per `agent-reusab
 
 ## Theme List
 
-- `light`, `dark`, `system` (OS-synced) — per `requirement-spec.md` §2. No second brand/white-label theme is defined — nothing in the BRD indicates Kart operates multiple brands (`requirement-spec.md` §9), so only one brand-token set exists today. The reusable standard's brand-token-layering structure means adding one later is additive, not a rework.
+- `light`, `dark`, `system` (OS-synced) — per `requirement-spec.md` §2. No second brand/white-label theme is defined — nothing in the BRD indicates Kart operates multiple brands (`requirement-spec.md` §9 resolution #5, confirmed final), so only one brand-token set exists today. The reusable standard's brand-token-layering structure means adding one later is additive, not a rework.
+- **RTL policy**: no launch language (`en`/`bn`/`de`, [`../localization.md`](../localization.md)) is RTL. Every token/component here uses CSS logical properties (`margin-inline-start`, not `margin-left`), so `dir="rtl"` support is structural, not a separate theme variant — enabling a future RTL language is a translation addition, not a token rework.
 
 ## Typography
 

@@ -54,7 +54,8 @@ kart-web/
 │   │   │   ├── checkout/              # Order + Payment (§3.4)
 │   │   │   ├── order-tracking/        # Order history/detail + Shipping + Delivery Tracking (§3.4)
 │   │   │   ├── account/               # Identity + User (§3.5)
-│   │   │   └── notifications/         # in-app center + push registration (§3.6)
+│   │   │   ├── notifications/         # in-app center + push registration (§3.6)
+│   │   │   └── cms/                   # About/FAQ/Terms/Privacy/Help — build-time prerendered, see seo.md §11 tier 2
 │   │   └── app.routes.ts              # every features/* entry is lazy
 │   ├── server.ts                      # Angular SSR entry point
 │   └── main.ts / main.server.ts
@@ -69,6 +70,8 @@ Notes:
 - `catalog/` intentionally spans four backend services (Product, Category, Search, Recommendation) plus Review's display surface, because from the customer's perspective "browsing the catalog" is one cohesive capability — splitting it into four UI features to mirror the backend 1:1 would fragment a single user journey for no client-side benefit. This is the frontend analogue of the Offer Service merge rationale (`ADR-0001`): the merge criterion is "what does the user experience as one thing," not "how many backend services answer it."
 
 ## SSR / Hosting / Deployment Topology
+
+Exact per-route SSR vs. CSR classification, meta/structured-data/sitemap/robots/hydration mechanics, and the three-tier route-prerender policy (per-request SSR / build-time prerender+webhook rebuild / CSR-only) are fully specified in [`seo.md`](seo.md) — not restated here. Deployment implications of the two-independent-client-app decision (this app vs. `kart-admin-web`) are formalized in [ADR-0022](../../adr/0022-client-app-split-confirmation.md).
 
 - **SSR runtime**: Node LTS, containerized (multi-stage Docker build, matching the backend's own mandatory multi-stage convention), deployed as a stateless K8s workload — no sticky sessions, no in-memory state that would prevent horizontal scaling (the BFF session cookie's actual session state lives server-side in the same session store approach `kart-identity-service` already uses, not in per-pod memory).
 - **Static assets** (JS/CSS bundles, images, fonts) are CDN-served with content-hash cache-busting (per the reusable performance standard) — the SSR pods serve rendered HTML and API-proxying only, never raw static file bytes at scale.

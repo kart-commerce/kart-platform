@@ -31,17 +31,17 @@ kart-admin-web/
 ├── src/
 │   ├── app/
 │   │   ├── core/
-│   │   │   ├── auth/                  # SSO federation flow (Admin) + native login (Support Agent)
+│   │   │   ├── auth/                  # SSO federation flow (Admin) + native login (Support Agent); idle-timer/warning-modal/multi-tab sync per ../security.md §2.2
 │   │   │   ├── http/                  # generated Gateway API clients
 │   │   │   └── config/
 │   │   ├── shared/
-│   │   │   └── ui/                     # reuses kart-web's design-tokens.md brand values, own component set
+│   │   │   └── ui/                     # consumes @kart/design-system (../design-system.md) — kart-web's brand tokens via the shared package, not a direct repo dependency
 │   │   ├── features/
 │   │   │   ├── catalog-management/     # §3.1
 │   │   │   ├── order-exceptions/       # §3.2
-│   │   │   ├── support-console/        # §3.3, Support Agent's capped surface
+│   │   │   ├── support-console/        # §3.3, Support Agent's capped surface — includes the Refund Requests queue
 │   │   │   ├── identity-admin/         # §3.4
-│   │   │   └── audit-compliance/       # §3.5
+│   │   │   └── audit-compliance/       # §3.5, extended with a Privacy Requests view (../privacy.md §B.9)
 │   │   └── app.routes.ts               # route guards reflect role, per requirement-spec.md §5 — UX only, not enforcement
 ├── tests/
 ├── Dockerfile
