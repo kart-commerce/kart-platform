@@ -22,7 +22,8 @@ cp reusables.config.example.json reusables.config.json
 - [`docs/adr/`](docs/adr/) — architecture decision records specific to Kart (the blank ADR template is reusable and lives in `agent-reusables`)
 - [`docs/architecture/`](docs/architecture/) — cumulative service-boundary graph and container diagram, built up as each service passes through the Architecture Agent
 - [`docs/ddd/ubiquitous-language.md`](docs/ddd/ubiquitous-language.md) — cross-service glossary, single term ownership, built up as each service passes through the DDD Agent
-- [`docs/services/`](docs/services/README.md) — **start here for any service**. Index of all 18 service folders, each with its own `requirement-spec.md` → `edge-cases.md` → `architecture.md` → `ddd-model.md` → contracts → `tickets.md`, populated by the agent pipeline below
+- [`docs/services/`](docs/services/README.md) — **start here for any backend service**. Index of all 18 service folders, each with its own `requirement-spec.md` → `edge-cases.md` → `architecture.md` → `ddd-model.md` → contracts → `tickets.md`, populated by the agent pipeline below
+- [`docs/client/`](docs/client/README.md) — **start here for the client tier**. Two Angular apps — `kart-web` (Customer storefront) and `kart-admin-web` (Support/Admin back office) — each with its own `requirement-spec.md` → `architecture.md` → (`design-tokens.md`/`api-integration-map.md` for `kart-web`). Project-agnostic frontend standards live in `agent-reusables/docs/standards/frontend/`, same split as the backend
 - [`AGENTS.md`](AGENTS.md) — the real system instructions for any agent/tool working in this repo (rules, reading order, approval-gate policy). Read directly — no per-tool pointer file in this repo.
 
 ## Agent Pipeline

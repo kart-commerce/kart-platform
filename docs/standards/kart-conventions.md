@@ -22,6 +22,12 @@ Concrete choices for this platform, layered on top of the project-agnostic stand
 
 Order, Payment, Inventory, Offer, and other kart domain services — see [PLATFORM_BLUEPRINT.md](../PLATFORM_BLUEPRINT.md) and [kart-requirements.md](../requirements/kart-requirements.md) for the full domain model and repository list.
 
+## Client Applications
+
+Kart ships **two** Angular applications, not one — `kart-web` (the `Customer` storefront) and `kart-admin-web` (the `Support Agent`/`Admin` back-office console) — per [`docs/client/README.md`](../client/README.md)'s app-split rationale, which formalizes the `Client / Mobile / Web` vs. `Support/Admin Console` distinction [`container-diagram.md`](../architecture/container-diagram.md) and [`system-context.md`](../architecture/system-context.md) already draw. Both names follow the naming convention [`PLATFORM_BLUEPRINT.md`](../PLATFORM_BLUEPRINT.md) §2.5 states for anything that isn't a `-service`: `kart-<role>`, stating what the repo *is*.
+
+Every project-agnostic frontend engineering standard (Angular architecture, coding standards, design-token system, state management, networking/resilience, performance, accessibility/i18n, security, testing, observability) lives in `agent-reusables/docs/standards/frontend/` — resolved via this repo's `reusables.config.json`, same pattern as every backend standard. This repo only holds what's Kart-specific: the actual requirements per app ([`docs/client/kart-web/requirement-spec.md`](../client/kart-web/requirement-spec.md), [`docs/client/kart-admin-web/requirement-spec.md`](../client/kart-admin-web/requirement-spec.md)), the actual brand token values ([`docs/client/kart-web/design-tokens.md`](../client/kart-web/design-tokens.md)), and the actual per-feature backend-service consumption map ([`docs/client/kart-web/api-integration-map.md`](../client/kart-web/api-integration-map.md)).
+
 ## Money-Moving Criticality
 
 Payment* events get the highest RabbitMQ retry count and human paging on final failure; catalog/search events tolerate looser retry — per the retry-budget rule in the reusable event standards.

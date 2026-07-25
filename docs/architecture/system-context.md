@@ -48,6 +48,15 @@ graph TB
 |Admin / Back-office Staff|Full back-office operations, authenticates via enterprise SSO federation|
 |Partner API Consumer|Non-interactive, scoped client-credentials access (e.g., bulk catalog upload)|
 
+## Client Applications
+
+The `Customer` and `Support Agent`/`Admin` actors above reach Kart through two separate Angular applications, not a generic "web client" — see [`docs/client/README.md`](../client/README.md) for the full app-split rationale and each app's design record:
+
+- **`kart-web`** — public storefront, serves `Customer`. Public/anonymous-heavy, SSR, PWA, the BRD §3 load ceiling.
+- **`kart-admin-web`** — internal back-office console, serves `Support Agent` and `Admin`. Authenticated-only, no SSR/SEO need, lower traffic.
+
+`Partner API Consumer` is non-interactive and has no client application — it calls `kart-api-gateway` directly via client-credentials.
+
 ## External Systems
 
 |System|Why It's Outside the Boundary|

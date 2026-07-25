@@ -9,7 +9,7 @@ Cumulative diagram, extended one service at a time as each passes through the Ar
 
 ```mermaid
 graph TB
-    Client[Client / Mobile / Web]
+    Client[kart-web<br/>Customer-facing Angular app]
     GW[API Gateway]
     Client --> GW
 
@@ -23,7 +23,7 @@ graph TB
     GW --> Category[kart-category-service<br/>Taxonomy + hierarchy + navigation]
     GW --> Wishlist[kart-wishlist-service<br/>Saved items + Price-Drop Alerts]
     GW -->|"sync REST: POST /orders, GET /orders/{id}, POST /orders/{id}/cancel"| Order
-    Support[Support/Admin Console] --> GW
+    Support[kart-admin-web<br/>Support Agent / Admin Angular app] --> GW
     GW -->|"sync REST: POST /payments/charge (secondary path — see below), POST /payments/{id}/refund (support-agent driven, BRD §22)"| Payment
 
     Order[kart-order-service<br/>Order lifecycle + Saga orchestrator]
