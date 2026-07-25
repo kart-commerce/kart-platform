@@ -1,5 +1,5 @@
 {
-  "$schema_note": "Machine-readable source of truth for docs/DEVELOPMENT_PLAN.md. scripts/release.sh reads this file. If you change a release's scope here, update DEVELOPMENT_PLAN.md's table in the same commit -- they must never silently diverge.",
+  "$schema_note": "The single source of truth for release scope. scripts/release.sh reads this file to generate docs/releases/generated/release-<N>-*.md. See docs/releases/README.md's Governing Rules section for the FE/BE timing and load-test-cadence rules this scope follows.",
   "releases": [
     {
       "number": 0,

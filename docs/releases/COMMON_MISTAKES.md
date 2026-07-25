@@ -50,7 +50,7 @@ Enterprise release-engineering mistakes, organized by category, that `scripts/re
 ## Process / Governance
 
 - **Merging without the human PR approval gate**, treating the Code Review Agent's advisory verdict as sufficient. It is explicitly advisory — human approval is required regardless of the agent's verdict.
-- **Silently re-ordering a release's scope without updating both `DEVELOPMENT_PLAN.md` and `releases.json` in the same change.** These two files must never diverge — if one changes, the other does too, in the same PR.
+- **Silently re-ordering a release's scope in `releases.json` without re-checking it against `docs/services/README.md`'s build order.** `releases.json` is the only place scope lives, but it's a grouping of that build order, not an independent decision — if the build order changes, the grouping needs re-verifying, not just carrying forward unchanged.
 
 ## Frontend-Specific
 
