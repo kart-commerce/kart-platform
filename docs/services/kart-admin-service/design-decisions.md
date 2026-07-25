@@ -64,6 +64,16 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
   - Why: this is the exact mechanism `edge-cases.md`'s revocation decision already relies on to get "no token-TTL exposure window at all" for the fine-grained layer — any TTL or invalidation-lag would reopen precisely the staleness window that decision was chosen to close
   - Trade-off accepted: one extra synchronous, indexed point-lookup per admin action versus a cached read — acceptable given Admin's low, human-paced request volume (the same reasoning `requirement-spec.md` §6 Decision D4 uses for its availability/latency tier) and given ample headroom under the 300ms write ceiling
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Admin's primary correlation field is `adminId` (paired with `entityId` on the affected record), and it runs the standard (not 100%) sampling tier since it sits outside the Order Saga. The one signal worth calling out is compliance/audit-adjacent: `AdminActionPerformed` traces should carry the same `adminId`/`entityId`/`action` attributes as the Outbox-published audit event itself, so a trace in Tempo and the corresponding audit row in Postgres can be cross-referenced during an incident review — though the OTel trace is diagnostic tooling, never a substitute for the 5-year-retention audit trail (requirement-spec.md §3/§6 Decision item 3).
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner (per design-decision-agent's Human Approval Required gate)

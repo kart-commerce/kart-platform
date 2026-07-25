@@ -145,6 +145,16 @@ Cross-cutting technology/design-pattern choices forced by this service's require
   - Why: the chargeback has already reversed the charge externally by the time this event arrives regardless of Order's current lifecycle position — treating it as illegal pre-`Delivered` would leave Order's own read model wrong about the order's true payment state; a third terminal state would duplicate `Refunded`'s existing meaning for no behavioral difference.
   - Trade-off accepted: the previously-exceptionless "`Refunded` only reachable from `Delivered`" rule now has exactly one named exception — scoped tightly to this one ADR-driven event, not a general loosening of the state machine.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Order carries `orderId` as its correlation/entity-id field on every log line and trace span, and sits in the **100%-trace-coverage tier** (requirement-spec §3 Observability row) since it is the Saga orchestrator itself — the one service whose traces must let an operator follow a single order across Inventory/Payment/Shipping/Delivery Tracking without gaps. This is purely the logging/tracing/metrics instrumentation layer; the Saga's own timeout, retry, and compensation mechanics are decided separately above (Per-Step Saga Timeout Budget, Retry/DLQ Tiering, Orphaned/Stuck Saga Reconciliation) — this decision only wires the signal that lets those mechanics be observed, e.g. a Grafana-alertable metric on `FulfillmentException`/`ChargebackReceived` entry rate.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

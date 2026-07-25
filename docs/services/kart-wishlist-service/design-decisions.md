@@ -56,6 +56,16 @@ Cross-cutting technology/design-pattern choices this service's approved `require
   - Trade-off accepted: the handler touches three stores instead of one — accepted because a compliance-critical event is exactly the case where synchronous, complete erasure is worth the extra handler complexity, consistent with `edge-cases.md`'s reasoning.
   - Idempotency: mirrors the platform's standard idempotent-consumer pattern (`event-standards.md`) already used for this service's own `UserDataErased`-adjacent dedup table — a redelivered event for an already-erased user finds nothing to delete and is a no-op.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Wishlist is not one of the four 100%-trace-coverage saga services, so it runs the reusable standard's default sampling. `userId` is the correlation field, since `WishlistEntry` is keyed on the `(userId, sku)` pair rather than a single wishlist-level id; per-entry spans (alert evaluation, stale-marking, reconciliation) additionally tag `sku`. One concrete signal worth a dashboard panel: the Redis-backed per-user digest-batching window's flush rate and pending-key count (the batching-window decision above), since that accumulator's own durability trade-off (a Redis outage can lose pending state mid-window) is exactly the kind of degraded path a Prometheus gauge plus a Grafana alert rule is meant to catch before it becomes a silently-missed price-drop alert.
+
 ## Escalations
 
 None remaining. The one prior escalation — ADR-0016 naming Wishlist as an expected `UserDataErased` consumer with no corresponding FR/invariant in this service's own `requirement-spec.md`/`edge-cases.md` at the time this section was first drafted — is now closed: this pass added the FR (requirement-spec §2), Domain Invariant (§4), API Surface row (§5), the "Residual Wishlist State After a `UserDataErased` Event" edge case, and the decision immediately above, mirroring the same "add the missing FR/decision to the named service's own docs" pattern `kart-identity-service` already used to close its own analogous ADR-0016 gap. All five decisions in this document are grounded directly in this service's approved `requirement-spec.md`/`edge-cases.md` and are single-service engineering defaults consistent with the project's shared standards (`event-standards.md`'s Outbox/DLQ defaults, `api-standards.md`'s REST/gRPC guidance, `ddd-cqrs-standards.md`'s rebuildable-read-model expectation) — no genuinely equivalent options requiring a business call were found among them.

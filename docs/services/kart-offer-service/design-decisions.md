@@ -73,6 +73,15 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
   - Why: a retried admin creation/deactivation call under transient network failure should surface as an idempotent no-op, not a raw primary-key-conflict error to the calling admin operator; keeps Offer's write-API idempotency story uniform across all of its write endpoints instead of ad hoc per-endpoint.
   - Trade-off accepted: this decision is grounded in cross-service consistency with Admin's own already-stated expectation, not a requirement Offer's own spec states outright for these four endpoints specifically. **Since resolved:** `api-contract.yaml` now specifies all four endpoints (plus two admin-read endpoints so a caller can obtain the `version` an `If-Match` precondition needs) with `Idempotency-Key` wired in exactly as described here — no longer a carried-forward gap.
 
+## Decision: Observability & Instrumentation
+
+- **Requirement driving this:** requirement-spec.md's Observability NFR row (§3, new) — Serilog + OpenTelemetry per the platform's reusable `observability-standards.md` and this repo's `kart-conventions.md` Observability section; Offer is on the **STANDARD sampling tier** (not one of the four Order Saga 100%-trace-coverage services), consistent with its own secondary-path Availability tier (§3).
+- **Options considered (2):** Ad-hoc per-service logging/APM tool choice · Platform-standard Serilog + OpenTelemetry SDK + Grafana LGTM stack (Loki/Tempo/Prometheus/Grafana), wired once via the shared `Kart.Shared.Observability` package.
+- **Decision:**
+  - Chosen: Serilog (structured JSON logs) + OpenTelemetry SDK (traces/metrics), via `Kart.Shared.Observability`. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards/alerting.
+  - Why: an ad-hoc per-service tool choice would fragment dashboards/alerting across 18 services and break single-`traceId` correlation. Offer's three merged aggregates (Coupon/Pricing/Promotion, ADR-0001) each carry their own correlation field on structured logs/trace attributes — `couponId` for redemption, `promotionId` for campaign activation, `quoteId` for pricing reads — alongside `traceId`/`service`/`level`. Concrete signal worth its own Grafana dashboard/alert: the redemption/lock-contention rate on the per-`coupon_code` pessimistic lock (Concurrency Control decision above) — a flash-sale coupon becoming a throughput bottleneck (the accepted trade-off in that decision) is exactly the kind of thing that should surface as a trace-latency/metric signal before it becomes a customer-visible checkout delay.
+  - Trade-off accepted: none material — this is the standards-consistent default, not a genuine trade-off between comparably-viable options.
+
 ## Not Decided Here
 
 - **Serialization format for events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`event-standards.md`); no divergence reason exists, so nothing to add here.

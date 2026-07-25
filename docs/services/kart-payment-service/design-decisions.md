@@ -55,6 +55,16 @@ Scope: cross-cutting technology/design-pattern choices only (idempotency mechani
   - Why: firing a refund against an unresolved charge is the direct double-money-movement risk BRD §2.2 exists to prevent; `payment_intents` is the one authoritative store to gate on (Domain Invariant #2), not the Order Saga's own local state.
   - Trade-off accepted: can stall an order's cancellation if the gateway is slow or unreachable; this stall is deliberately left unbounded by the write-path NFR (only the synchronous accept/enqueue of the refund request is bounded, per Open Question #5) — a correctness-over-latency trade the "never double-charge" invariant justifies, consistent with `kart-order-service`'s own reverse-order compensation decision that this same reconciliation gate must not be short-circuited when a chargeback (ADR-0012) is the trigger instead of an ordinary Saga failure.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Payment carries `paymentId` as its correlation/entity-id field on every log line and trace span, and sits in the **100%-trace-coverage tier** (requirement-spec §3 Observability row) since it is the platform's money-moving-critical service (BRD §2.2's "never double-charge" rule) and a required step in both the Order Saga's success and failure flows. A concrete signal fitting this service's own domain: a Grafana-alertable Prometheus counter on gateway-call circuit-breaker trips (the Resilience Pattern decision above) gives on-call the same paged-tier visibility into gateway degradation that `PaymentFailed`'s own 5x/`payment.dlq` retry tier already gives into event-delivery failure.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

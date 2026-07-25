@@ -64,6 +64,15 @@ Both source docs are `status: approved` with all blocking Open Questions resolve
   - Why: the opt-out invariant is absolute ("must never dispatch... regardless of criticality tier") — any cache staleness window, even a short TTL or a startup-preload gap after a preference change, risks exactly the outcome the invariant forbids; reusing the store the idempotency check already queries avoids adding Redis purely to solve a caching problem correctness doesn't actually permit trading off
   - Trade-off accepted: one extra indexed DB read (or an extended combined query) per send attempt at up to ~50,000 msgs/sec peak, instead of the lower-latency path a cache would offer — accepted because per-channel bulkhead pools (see resilience decision above) already isolate this read's latency from cascading across channels, and correctness of "never dispatch to an opted-out channel" outweighs the raw throughput headroom a cache would buy
 
+## Decision: Observability & Instrumentation
+
+- **Requirement driving this:** requirement-spec.md's Observability NFR row (§3, new) — Serilog + OpenTelemetry per the platform's reusable `observability-standards.md` and this repo's `kart-conventions.md` Observability section; Notification is on the **STANDARD sampling tier** (not one of the four Order Saga 100%-trace-coverage services), consistent with its own Availability NFR reasoning (§3: not an Order Saga compensation participant, no synchronous inbound dependents).
+- **Options considered (2):** Ad-hoc per-service logging/APM tool choice · Platform-standard Serilog + OpenTelemetry SDK + Grafana LGTM stack (Loki/Tempo/Prometheus/Grafana), wired once via the shared `Kart.Shared.Observability` package.
+- **Decision:**
+  - Chosen: Serilog (structured JSON logs) + OpenTelemetry SDK (traces/metrics), via `Kart.Shared.Observability`. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards/alerting.
+  - Why: an ad-hoc per-service tool choice would fragment dashboards/alerting across 18 services and break single-`traceId` correlation; since Notification has no inbound API (§2/§5 — consumer-only), its trace root is always the propagated context of the triggering event, carried through by the same OTel message-bus instrumentation the shared package wires for every RabbitMQ consumer, never a fresh span. `notificationId` is Notification's own correlation field alongside `traceId`/`service`/`level`. Concrete signal worth its own Grafana dashboard/alert: per-channel send-failure rate feeding `notification.dlq` (Retry & DLQ Mechanism decision above) — a rising DLQ rate for one specific channel is the earliest signal of a downstream provider outage, ahead of the circuit breaker even tripping.
+  - Trade-off accepted: none material — this is the standards-consistent default, not a genuine trade-off between comparably-viable options.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

@@ -53,6 +53,16 @@ source: docs/services/kart-review-service/requirement-spec.md, docs/services/kar
   - Why: eliminates an entire class of reversal/compensation logic and the new moderation-outcome event that publish-and-compensate or reserve/commit would require, at no added cost beyond what the moderation-workflow decision (design-decision above, requirement-spec §6 Q1) already accepted — since only the flagged minority is ever delayed, deferring costs nothing for the majority of submissions.
   - Trade-off accepted: none beyond what the moderation-workflow decision already accepts (queue latency for flagged content only) — stated here as a generalization to future side-effects, not a new cost.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Review is not one of the four 100%-trace-coverage saga services, so it runs the reusable standard's default sampling (100% of error traces, a smaller percentage of successful ones) rather than a dedicated tier; `reviewId` is the correlation field carried on every log/span/exemplar, matching the id already threaded through `ReviewSubmitted`'s payload so a trace for a submission, moderation-queue hold, or aggregate update all pivot on the same key. One concrete signal worth a dashboard panel: the moderation-filter call's own span duration and the queued-vs-auto-published split rate, since that synchronous call sits inside the write-path latency budget (§3) and its own resilience pattern (fail-safe-to-queue on timeout, see the Decision above) is exactly the kind of degraded path the `Warning`-level log convention exists to surface.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

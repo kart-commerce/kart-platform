@@ -47,6 +47,16 @@ Scope: cross-cutting technology/pattern choices this service's own approved `req
   - Why: the cycle-check and max-depth invariants (requirement-spec §4) must reject an invalid move synchronously so Admin's caller sees the failure immediately — an async command would defer that rejection past the point Admin can usefully react; gRPC is reserved by the platform's API standards for high-throughput internal calls, and admin-driven taxonomy curation is low-volume and human-triggered, not that profile.
   - Trade-off accepted: Admin's call is a blocking network hop rather than fire-and-forget — acceptable because it's the same trade-off every synchronous validation-bearing write already makes, and taxonomy curation sits on Category's "secondary path" availability tier (requirement-spec §3), not the platform's 99.99%-critical path.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Category's primary correlation field is `categoryId`, and it runs the standard (not 100%) sampling tier — taxonomy curation is RBAC-gated, low-volume, and absent from both the Order Saga and the 99.99% availability tier. The metric worth calling out is `/categories` read-path latency against the write-through Redis cache (this doc's Caching Strategy decision), since a cache-miss rate spike or a Redis-eviction event is the earliest signal of the exact P95/P99 read-latency risk that decision exists to protect against.
+
 ## Escalations
 
 None. Every decision above resolves to one option on engineering grounds already stated in requirement-spec.md, edge-cases.md, an existing ADR, or the platform's own standards/BRD precedent (kart-requirements.md §11, §16) — none of the four are a genuine business call (cost, vendor lock-in, team familiarity) between equivalent options.

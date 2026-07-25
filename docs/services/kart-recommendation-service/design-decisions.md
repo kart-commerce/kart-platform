@@ -46,6 +46,16 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
   - Why: keeps the live-call rate down to cache misses/expiries only rather than one external call per recommended item per request, protecting the latency NFR the "no cache" baseline already put at risk; Redis is the platform's existing read-side cache tier, consistent with the CQRS read-model conventions (read model rebuildable, no direct writes outside a projection) rather than introducing a new infrastructure piece
   - Trade-off accepted: a short TTL still leaves a small staleness window where a just-delisted product could be served before the cache entry expires — accepted because the BRD gives no staleness bound for Recommendation at all (requirement-spec §3), and this window is far smaller than the "accept staleness, periodic batch recompute" option edge-cases.md already rejected for the underlying signal itself
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Recommendation carries `userId` (its own read-model key, `GET /recommendations/{userId}`) as its correlation/entity-id field on every log line and trace span, and sits in the **STANDARD sampling tier** — it is not one of the four Order-Saga services, so it gets the reusable standard's default sampling (100% of error traces, a smaller percentage of successful ones) rather than 100% blanket coverage. A concrete signal fitting this service's own domain: a Grafana dashboard on the availability-filter's circuit-breaker trip rate and fail-open fallback rate (the Resilience Pattern decision above) gives visibility into how often stale/unsellable items risk surfacing when the live availability check degrades.
+
 ## Sign-off
 
 - [x] Chosen technologies/patterns reviewed by a human: Automated architecture pipeline — autonomous completion authorized by project owner

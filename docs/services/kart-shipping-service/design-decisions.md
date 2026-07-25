@@ -56,6 +56,16 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec 
   - Why: `kart-conventions.md`'s stated rule ties the elevated tier to money-moving events specifically; Shipping's own NFR table and ADR-0015 both already fix the standard tier for these two events, and neither event gates order confirmation (ADR-0002) the way a stuck Order-lifecycle event would — a stuck `ShipmentDispatched`/`ShipmentCreationFailed` delays fulfillment visibility, not payment capture or order confirmation.
   - Trade-off accepted: a DLQ'd Shipping event can sit unprocessed longer before a human notices than a paged Payment event would — accepted because Shipping is the platform's secondary-availability tier (requirement-spec §3) by ADR-0002's own construction, not a corner case invented here.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Shipping is one of the four 100%-trace-coverage saga services (`kart-conventions.md`), traced at 100% rather than the reusable standard's default sampling, since it is a core saga participant even though ADR-0002 keeps it off Order's synchronous confirmation path. `shipmentId` is the primary correlation field, with `orderId` also carried on the `OrderConfirmed`-consumer span and the out-of-band carrier-call span (the Transactional Outbox decision above) so a trace stitches back to the originating order across the async boundary ADR-0002 introduces. One concrete signal worth a dashboard panel: per-carrier circuit-breaker state and label-generation duration (the resilience-pattern decision above), since that external carrier call is this service's only third-party outbound dependency and the one most likely to need a trace-to-metric pivot during an incident.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

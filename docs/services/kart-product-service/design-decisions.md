@@ -73,6 +73,16 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
   - Why: already the platform's stated default (BRD §8: "Queue per Consumer Group... each service owns its own queue"; §8.3 explicitly rejects the shared-queue option because "one slow consumer blocks all others").
   - Trade-off accepted: still bounded by RabbitMQ's overall fan-out throughput ceiling (BRD §14) — this only defers, not eliminates, an eventual Kafka move for catalog events if volume grows enough.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Product carries `sku` (the variant/priced unit, not the parent product id) as its correlation/entity-id field on every log line and trace span, and sits in the **STANDARD sampling tier** — it is not one of the four Order-Saga services, so it gets the reusable standard's default sampling (100% of error traces, a smaller percentage of successful ones) rather than 100% blanket coverage. A concrete signal fitting this service's own domain: a Grafana dashboard on per-consumer-group publish-to-DLQ rate for the high-fan-out `ProductCreated`/`ProductPriceChanged` events (the Bulkhead Isolation decision above) gives visibility into whether one slow downstream consumer group (Search, Recommendation, Wishlist, Offer/Pricing) is silently accumulating DLQ backlog.
+
 ## Not Decided Here
 
 - **Serialization format for events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`agent-reusables/docs/standards/event-standards.md`, resolved via this repo's `reusables.config.json`); no divergence reason exists, so nothing to add here.

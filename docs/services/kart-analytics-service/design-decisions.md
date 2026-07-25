@@ -67,6 +67,16 @@ Cross-cutting technology/pattern choices this service's approved requirement-spe
   - Why: reuses the raw-storage-first design already chosen for replay correctness (above) — one source of truth handles both "replay after a bug" and "events arriving late," instead of a bespoke mechanism per failure mode.
   - Trade-off accepted: real-time dashboards stay provisional/approximate until the nightly reconciliation runs — exact funnel numbers are not available instantly. This eventual-consistency window must be surfaced to whatever internal query layer (D4b) is later chosen, not hidden behind a fake-precise number, per `agent-reusables/docs/standards/ddd-cqrs-standards.md`'s "surface, don't hide" CQRS default.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Analytics' primary correlation field is `eventId` — the ingested event's own id, the same key its idempotent-upsert dedup mechanism (this doc's "Idempotency Mechanism for Replay-Safe Aggregation" decision) already keys on, so a trace/log line for a given ingested event lines up directly with its raw-storage row. Analytics runs the standard (not 100%) sampling tier — it is a pure consumer sink, never a Saga participant. The metric worth calling out is consumer-group lag per Kafka partition (feeding the autoscaling decision above) and `analytics.dlq` depth, since both are the earliest signal of the exact backpressure/ingestion-failure scenarios this doc's Concurrency/Scaling and Resilience decisions already exist to handle.
+
 ## Out of scope for this doc (left to later stages)
 
 - Concrete dashboard/funnel query-layer technology (internal REST/GraphQL vs. BI-tool connection) — requirement-spec §1/§5 (D4b) explicitly hands this to the Architecture/API Design Agents.

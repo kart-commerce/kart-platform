@@ -55,6 +55,16 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
   - Why: Domain Invariant §4 explicitly rules out a "separately-cached or stale aggregate" for facets — introducing a Redis (or equivalent) result cache would reopen exactly the staleness problem the invariant forecloses, adding a second, response-level staleness clock the requirement-spec never asks for on top of the already-bounded index-freshness one (Decision 1)
   - Trade-off accepted: every `/search` call pays a live query cost against the 100M-SKU index instead of a cache-hit shortcut, unlike the caching layers Product/Recommendation use for their own reads — accepted because the Latency NFR is engineered to hold via the facet-query resilience pattern (Decision 3) instead; if load-testing later shows the NFR can't be met without a cache, that is a genuine Architecture Agent revisit against a standing invariant, not something this stage should pre-decide around
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Search is not one of the four 100%-trace-coverage saga services, so it runs the reusable standard's default sampling; a request-scoped `queryId` is the correlation field for `GET /search` spans/logs (Search has no per-user or per-entity ownership dimension to key on instead, §3), while the indexing-consumer pipeline carries `sku` to match what `ProductCreated`/`ProductPriceChanged`/`ProductDiscontinued` actually key on. One concrete signal worth a dashboard panel: index-catch-up lag (Outbox-insert-to-searchable), since Decision 1 above already commits this service to a P95 < 5s / P99 < 15s bound — the Prometheus histogram for that lag, with a trace exemplar per bucket, is what turns that NFR from a paper commitment into something an on-call engineer can actually watch and alert on.
+
 ## Not Decided Here
 
 - **Serialization format for consumed events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`docs/standards/event-standards.md`); no divergence reason exists, so nothing to add here.

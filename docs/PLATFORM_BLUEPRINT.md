@@ -872,7 +872,7 @@ Every agent follows this contract. Full table below; the Offer Service walkthrou
 | Output | Deployment Verification Report; ongoing alerts |
 | Responsibilities | Compare against documented NFR targets (BRD §3); trigger rollback path on breach |
 | Dependencies | Deployment Agent |
-| Tools | Metrics/tracing backend query API |
+| Tools | Prometheus (metrics query API), Grafana Tempo (trace query API), Grafana Loki (log query API) — see `docs/standards/kart-conventions.md` Observability section |
 | Memory Used | Business Rule Memory (read, for SLO targets), Decision Memory (write, incident record) |
 | Failure Conditions | SLO breach within verification window |
 | Retry Strategy | N/A — breach triggers Incident/Rollback Agent, not a retry |

@@ -55,6 +55,16 @@ Cross-cutting technology/pattern choices this service's requirement-spec and edg
   - Why: any cache TTL would silently fix a staleness bound requirement-spec §6 item 5 explicitly declines to set yet (carried to the Architecture Agent once real infrastructure numbers exist) — introducing one here would invent a number this stage has no basis for; a single-document point lookup by `trackingId` (the same key the concurrency-control decision above already relies on) is expected to meet the stated latency budget without one.
   - Trade-off accepted: if read volume later proves this endpoint needs a cache to hold the latency budget under load, that is deferred to the Architecture Agent as a capacity-driven addition — not ruled out permanently, just not invented here without a stated need.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Delivery Tracking's primary correlation field is `trackingId`, and it runs the standard (not 100%) sampling tier — it is a Bus fan-out consumer, not an Order Saga participant. The moderation-latency-shaped metric worth calling out is time-from-webhook-receipt to internal-event-processing across the durable RabbitMQ ingestion buffer (this doc's "Durable Ingestion Buffering Pattern" decision) plus per-carrier circuit-breaker state (the polling-fallback resilience decision) — both are the earliest signal of the carrier-webhook-silence scenario edge-cases.md already flags as this service's main failure mode.
+
 ## Sign-off
 
 - [x] Chosen technologies/patterns reviewed by a human — Automated architecture pipeline, autonomous completion authorized by project owner
