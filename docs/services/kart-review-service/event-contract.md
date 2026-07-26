@@ -8,7 +8,7 @@ source: docs/services/kart-review-service/ddd-model.md, docs/services/kart-revie
 
 # Event Contract: kart-review-service
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`, using `review` as both domain word and entity segment — the same same-name-entity-segment precedent `kart-order-service/event-contract.md` and `kart-notification-service/event-contract.md` set for a service's own principal published stream. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10/`architecture.md`'s simplified shared `review.dlq` label is split here into one DLQ per published event, the same expansion `kart-order-service/event-contract.md` already applied to its own BRD-simplified shared `order.dlq` label.
+Exchange: `review.exchange` (RabbitMQ topic exchange, owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`, using `review` as both domain word and entity segment — the same same-name-entity-segment precedent `kart-order-service/event-contract.md` and `kart-notification-service/event-contract.md` set for a service's own principal published stream. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10/`architecture.md`'s simplified shared `review.dlq` label is split here into one DLQ per published event, the same expansion `kart-order-service/event-contract.md` already applied to its own BRD-simplified shared `order.dlq` label.
 
 ## Published
 

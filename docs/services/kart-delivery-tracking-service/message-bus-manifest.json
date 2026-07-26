@@ -1,0 +1,31 @@
+{
+  "service": "kart-delivery-tracking-service",
+  "exchange": { "name": "tracking.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "tracking.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "tracking.shipping-events.queue",
+      "bindings": [
+        { "exchange": "shipping.exchange", "routingKey": "shipping.shipment.dispatched" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "tracking.dlx",
+        "x-dead-letter-routing-key": "tracking.shipping-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "tracking.shipping-events.dlq", "bindings": [{ "exchange": "tracking.dlx", "routingKey": "tracking.shipping-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "tracking.shipping-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "tracking.shipping-events.queue"
+      }
+    }
+  ],
+  "_comment": "Delivery Tracking publishes DeliveryStatusUpdated onto tracking.exchange (own topology, not shown — Order/Notification/Analytics bind their own queues to it)."
+}

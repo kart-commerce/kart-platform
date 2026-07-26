@@ -1,0 +1,9 @@
+{
+  "service": "kart-payment-service",
+  "exchange": { "name": "payment.exchange", "type": "topic", "durable": true },
+  "dlx": null,
+  "queues": [],
+  "dlqs": [],
+  "retry": [],
+  "_comment": "Payment publishes PaymentCompleted/PaymentFailed/RefundIssued (all 5x exponential, paged on-call per event-contract.md) onto payment.exchange; it consumes no events (Order integrates with it synchronously). No own DLX/queues needed. Consumers (Order, Notification, Analytics) each declare their own queues bound to payment.exchange."
+}

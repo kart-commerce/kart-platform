@@ -1,0 +1,31 @@
+{
+  "service": "kart-shipping-service",
+  "exchange": { "name": "shipping.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "shipping.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "shipping.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.order.confirmed" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "shipping.dlx",
+        "x-dead-letter-routing-key": "shipping.order-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "shipping.order-events.dlq", "bindings": [{ "exchange": "shipping.dlx", "routingKey": "shipping.order-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "shipping.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "shipping.order-events.queue"
+      }
+    }
+  ],
+  "_comment": "Shipping publishes ShipmentDispatched/ShipmentCreationFailed onto shipping.exchange (own topology, not shown — Order/Delivery Tracking/Analytics/Notification bind their own queues to it)."
+}

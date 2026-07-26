@@ -147,9 +147,15 @@ graph LR
         P3D[kart-analytics-service]
         P3E[kart-admin-service]
     end
+    subgraph "Phase 4 — Client Applications"
+        P4A[kart-web]
+        P4B[kart-admin-web]
+    end
     P0A --> P1A
     P1A --> P2A
     P2A --> P3A
+    P1H --> P4A
+    P3E --> P4B
 ```
 
 | Repo | Contains | Deploy Unit? |
@@ -158,8 +164,10 @@ graph LR
 | `kart-shared` | Event JSON-Schemas, OpenAPI contracts, versioned NuGet packages (logging, tracing, outbox base, Result types) | Published as packages, not deployed |
 | `kart-infra` | Terraform/Pulumi, Helm charts, K8s cluster bootstrap, network policies | Applied, not deployed |
 | `kart-devops` | Reusable GitHub Actions workflows, pipeline templates, shared linters/scanners config | Consumed via `workflow_call` |
-| `kart-<name>-service` × 20 | One per BRD service, each Clean Architecture + Vertical Slice, own DB, own pipeline | Yes |
+| `kart-<name>-service` × 18 | One per BRD service, each Clean Architecture + Vertical Slice, own DB, own pipeline | Yes |
 | `kart-api-gateway` | Gateway routing/rate-limit config, BFF if needed | Yes |
+| `kart-web` | The single Angular application for the `Customer` actor — see `docs/client/kart-web/` | Yes |
+| `kart-admin-web` | The single Angular application for the `Support Agent`/`Admin` actors — see `docs/client/kart-admin-web/` | Yes |
 
 ### 2.5 GitHub Organization Structure (Free-Tier Operational Guide)
 
@@ -169,7 +177,7 @@ GitHub Free (personal or organization) has unlimited public **and** private repo
 
 | Namespace | Holds | Why separate |
 |---|---|---|
-| A dedicated GitHub **Organization** (e.g. `kart-commerce`) | Every Kart-specific repo: `kart-platform`, `kart-requirements`, `kart-shared`, `kart-infra`, `kart-devops`, `kart-api-gateway`, all 18 `kart-<name>-service` repos | This is the product's home — same reason a real company puts its product repos under a company org, not an individual's personal account |
+| A dedicated GitHub **Organization** (e.g. `kart-commerce`) | Every Kart-specific repo: `kart-platform`, `kart-requirements`, `kart-shared`, `kart-infra`, `kart-devops`, `kart-api-gateway`, all 18 `kart-<name>-service` repos, plus the two client apps `kart-web` and `kart-admin-web` | This is the product's home — same reason a real company puts its product repos under a company org, not an individual's personal account |
 | The personal account (or a separate, neutral org later) | `agent-reusables` | It explicitly claims to be reusable "across every project, not just one product" (its own README) — housing it inside the Kart org would misrepresent it as Kart-specific and contradicts the same reusable-vs-business separation this whole platform is built on |
 
 Creating an organization is free and gives you, at zero cost: an org-wide profile page, unlimited collaborators (useful the moment this stops being solo), and the org-wide features below — none of this is available to the same degree spread across unrelated personal-account repos.
@@ -188,6 +196,7 @@ Creating an organization is free and gives you, at zero cost: an org-wide profil
 | `kart-identity-service`, `kart-product-service`, `kart-inventory-service`, `kart-cart-service`, `kart-order-service`, `kart-payment-service`, `kart-offer-service`, `kart-api-gateway` | Order-critical-path services + gateway | 1 |
 | `kart-search-service`, `kart-notification-service`, `kart-shipping-service`, `kart-delivery-tracking-service`, `kart-user-service`, `kart-category-service` | Fulfillment & discovery services | 2 |
 | `kart-review-service`, `kart-wishlist-service`, `kart-recommendation-service`, `kart-analytics-service`, `kart-admin-service` | Growth & ops services | 3 |
+| `kart-web`, `kart-admin-web` | Client applications — single Angular app per actor group (`Customer`; `Support Agent`/`Admin`), see `docs/client/README.md` for the app-split rationale | 4 |
 
 **Free-tier professional polish, all zero-cost:**
 
@@ -247,6 +256,10 @@ kart-platform/
 │   │       ├── event-contract.md
 │   │       ├── database-design.md
 │   │       └── decisions.md               # service-local ADR log
+│   ├── client/
+│   │   ├── README.md                      # why two client apps, not one
+│   │   ├── kart-web/                      # Customer-facing storefront design record
+│   │   └── kart-admin-web/                # Support Agent / Admin back-office design record
 │   └── runbooks/
 │       ├── incident-response.md
 │       └── rollback-procedures.md
@@ -859,7 +872,7 @@ Every agent follows this contract. Full table below; the Offer Service walkthrou
 | Output | Deployment Verification Report; ongoing alerts |
 | Responsibilities | Compare against documented NFR targets (BRD §3); trigger rollback path on breach |
 | Dependencies | Deployment Agent |
-| Tools | Metrics/tracing backend query API |
+| Tools | Prometheus (metrics query API), Grafana Tempo (trace query API), Grafana Loki (log query API) — see `docs/standards/kart-conventions.md` Observability section |
 | Memory Used | Business Rule Memory (read, for SLO targets), Decision Memory (write, incident record) |
 | Failure Conditions | SLO breach within verification window |
 | Retry Strategy | N/A — breach triggers Incident/Rollback Agent, not a retry |
@@ -1051,11 +1064,19 @@ graph TB
     INFRA[kart-infra<br/>Terraform, Helm, K8s bootstrap]
     DEVOPS[kart-devops<br/>reusable CI/CD workflows]
     GW[kart-api-gateway]
+    WEB[kart-web]
+    ADMINWEB[kart-admin-web]
     ORDER[kart-order-service]
     OFFER[kart-offer-service]
     INV[kart-inventory-service]
     PAY[kart-payment-service]
 
+    PLAT -->|design docs consumed by agents| WEB
+    PLAT -->|design docs consumed by agents| ADMINWEB
+    REUSABLES[agent-reusables<br/>frontend standards] -->|resolved via reusables.config.json| WEB
+    REUSABLES -->|resolved via reusables.config.json| ADMINWEB
+    WEB --> GW
+    ADMINWEB --> GW
     PLAT -->|design docs consumed by agents| ORDER
     PLAT -->|design docs consumed by agents| OFFER
     PLAT -->|design docs consumed by agents| INV
@@ -1154,7 +1175,7 @@ sequenceDiagram
 
 ## 14. Agent Communication Flow
 
-Agents do not call each other directly (no agent-to-agent RPC mesh) — they communicate exclusively through the Orchestrator's job queue and shared state (KB + Memory), the same decoupling principle the BRD applies to Kart's own services (topic exchange, publishers don't know consumers).
+Agents do not call each other directly (no agent-to-agent RPC mesh) — they communicate exclusively through the Orchestrator's job queue and shared state (KB + Memory), the same decoupling principle the BRD applies to Kart's own services (each service's own topic exchange, publishers don't know consumers — BRD §8).
 
 ```mermaid
 graph LR
@@ -1181,12 +1202,14 @@ graph LR
 | **CQRS** | Write model is always PostgreSQL, source of truth; read model always rebuildable from write model + event log; never write directly to a read model outside a projection consumer |
 | **Naming** | Services: `kart-<noun>-service`; events: `<Entity><PastTenseVerb>` (e.g., `OrderCreated`); routing keys: `service.entity.action` |
 | **Folder Structure** | Clean Architecture layers (`Api/Application/Domain/Infrastructure`) + Vertical Slices inside `Application` (one folder per use case, not one folder per technical layer) |
+| **Frontend (client tier)** | Angular LTS, standalone components, signals-first, strict TypeScript, zero `any`; feature-based folder structure mirroring backend bounded contexts; centralized design tokens/asset/icon registry, no hardcoded visual values; generated typed API clients from each service's OpenAPI contract, never hand-written HTTP calls. Full rule set: `agent-reusables/docs/standards/frontend/` (project-agnostic) + `docs/client/<app>/` (Kart-specific — brand tokens, service-consumption map) |
 | **Configuration Management** | Config-driven over code-driven, wherever the same effect is achievable without a deploy — generalizes the message-bus manifest rationale (BRD §9: reviewable diff, no dev/staging/prod drift, non-backend readable) to every tunable knob, not just topology. Four JSON-backed layers, never hardcoded: **Startup** — idempotent declarative bootstrap manifests (e.g. the RabbitMQ topology JSON, BRD §9) read at process start, not built up imperatively in `Program.cs`; **Settings** — per-service `appsettings.json` (.NET convention) for that service's own tunables (retry counts, cache TTLs, feature toggles); **GlobalConfig** — a shared platform-wide defaults/feature-flag source every service inherits before layering its own `appsettings.json` overrides on top, so a cross-cutting default changes once, not in 18 repos; **Env** — `appsettings.{Environment}.json` + environment variables for environment-specific values only, injected via K8s ConfigMap for non-secrets and Secret for secrets (never committed, never a literal in source). A code change is the fallback only when the decision requires new logic, not just a new value. |
 | **Clean Code / SOLID / Design Patterns** | SOLID as the non-negotiable baseline; constructor-injected dependencies only, no service locators; a reach-for-this pattern table (Strategy/Factory/Decorator/Specification/Mediator/Repository/Adapter) tied to the problem shape, not applied by default; DRY only after a third duplicate, never from two |
 | **Logging** | Structured JSON only; mandatory fields: `traceId`, `service`, `level`, entity id relevant to the operation. Tooling: Serilog (structured JSON sink) + OpenTelemetry (trace/span injection) → Grafana Loki (aggregation/query), mandatory in every service, no substitutions without an ADR |
 | **Observability** | RED metrics per service; W3C Trace Context propagated through HTTP and message headers; 100% trace coverage on the order path. Tooling: Prometheus (metrics) + Tempo (tracing) + Grafana (dashboards + alerting) — the Grafana LGTM stack, one OTel SDK across all services, mandatory in every service, no substitutions without an ADR |
 | **Versioning** | Semantic Versioning for all published packages/contracts; API versioned via URL prefix (`/v1/`) |
-| **Error Handling** | Result/Either pattern for domain errors, exceptions reserved for truly exceptional (infra) failures; no silent catch-and-continue |
+| **Error Handling** | Result/Either pattern for domain errors, exceptions reserved for truly exceptional (infra) failures; no silent catch-and-continue; **one global exception-handling middleware per service is mandatory** — no local `try/catch` in Handler/controller code to translate or log an exception, that's the global handler's job, wired once via `Kart.Shared.ErrorHandling` |
+| **Response Model** | One consistent response envelope across every endpoint and every service — errors as `ProblemDetails` + platform extension fields (`traceId`, `errorCode`), success responses following the same convention platform-wide; produced solely by the global exception handler/validation path, never hand-built per endpoint |
 | **Resilience** | Circuit breaker on every synchronous outbound call; bounded exponential-backoff retry on idempotent operations only; bulkhead isolation per dependency; explicit timeout budgets; degrade gracefully rather than cascade |
 | **Validation** | FluentValidation (or equivalent) at the API boundary; domain invariants enforced in the aggregate, never only at the edge |
 | **Caching** | Cache-aside default; write-through only when staleness is provably unacceptable (pricing/promotion flags); explicit invalidation on the relevant domain event, never TTL-only for price-sensitive data |
@@ -1194,7 +1217,7 @@ graph LR
 | **AuthN/AuthZ** | OAuth2 Authorization Code (user-facing), Client Credentials (service-to-service); scope-based authorization |
 | **REST** | Resource-oriented URLs, standard verbs/status codes, `Idempotency-Key` header mandatory on money-moving POSTs |
 | **gRPC** | Reserved for internal high-throughput sync calls only (e.g., Inventory reserve check), never public-facing |
-| **RabbitMQ** | Topic exchange convention per BRD §8; per-service DLQ; TTL-ladder retry, never immediate requeue-loop |
+| **RabbitMQ** | One topic exchange per publishing service, no shared exchange, per BRD §8; per-service DLX/DLQ; TTL-ladder retry, never immediate requeue-loop |
 | **Kafka** | Adopted per-consumer-group via strangler migration (BRD §15), never wholesale; partition key = aggregate id for ordering |
 | **Redis** | Cache-aside for reads, write-through for pricing/promo; key convention `service:entity:id[:shard]` |
 | **MongoDB** | Denormalized read models; shard key chosen for even distribution + query locality, documented in Database Memory |

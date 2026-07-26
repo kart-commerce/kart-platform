@@ -1,0 +1,32 @@
+{
+  "service": "kart-inventory-service",
+  "exchange": { "name": "inventory.exchange", "type": "topic", "durable": true },
+  "dlx": { "name": "inventory.dlx", "type": "topic", "durable": true },
+  "queues": [
+    {
+      "name": "inventory.order-events.queue",
+      "bindings": [
+        { "exchange": "order.exchange", "routingKey": "order.order.cancelled" },
+        { "exchange": "order.exchange", "routingKey": "order.order.compensation-triggered" }
+      ],
+      "arguments": {
+        "x-dead-letter-exchange": "inventory.dlx",
+        "x-dead-letter-routing-key": "inventory.order-events.dlq"
+      }
+    }
+  ],
+  "dlqs": [
+    { "name": "inventory.order-events.dlq", "bindings": [{ "exchange": "inventory.dlx", "routingKey": "inventory.order-events.dlq" }] }
+  ],
+  "retry": [
+    {
+      "name": "inventory.order-events.retry.30s",
+      "arguments": {
+        "x-message-ttl": 30000,
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "inventory.order-events.queue"
+      }
+    }
+  ],
+  "_comment": "Inventory publishes InventoryReserved/InventoryReservationFailed/InventoryReleased onto inventory.exchange (own topology, not shown — Order/Cart/Analytics bind their own queues to it)."
+}

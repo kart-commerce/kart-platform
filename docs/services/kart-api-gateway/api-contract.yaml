@@ -1,0 +1,207 @@
+# doc_type: api-contract
+# service: kart-api-gateway
+# status: approved
+# generated_by: api-design-agent
+# source: docs/services/kart-api-gateway/requirement-spec.md,
+#         docs/services/kart-api-gateway/edge-cases.md,
+#         docs/services/kart-api-gateway/design-decisions.md,
+#         docs/services/kart-api-gateway/architecture.md,
+#         docs/services/kart-api-gateway/ddd-model.md
+#
+# NOT an OpenAPI domain-operation contract. ddd-model.md already establishes this
+# service has no domain aggregates; this is a ROUTING CONFIG CONTRACT — the
+# declarative source of truth for the route table the Gateway's own YARP
+# appsettings.json config (and the Coding Agent that writes it) must implement.
+# Shape: path prefix -> upstream service, auth requirement per route, rate-limit
+# tier per route. See design-decisions.md for why these four rate-limit tiers
+# and these two auth requirements are the full vocabulary this release needs.
+#
+# No breaking-change risk: first issue of this contract, nothing published to a
+# shared-contracts repo yet (kart-shared does not exist in this pipeline's scope).
+#
+# Money-adjacent Idempotency-Key rule (api-standards.md): not applicable — no
+# route in this contract proxies a money-moving endpoint (Payment does not exist
+# in this release's scope; Identity/Category's own contracts already state N/A).
+
+docType: routing-contract
+service: kart-api-gateway
+version: 1.0.0
+description: >
+  Route table for the platform edge gateway (BRD §18). Path-based routing with
+  a version prefix, JWT validation against Identity's JWKS, a shared-Redis
+  revocation-list check (kart-identity-service/architecture.md), and per-route
+  tiered token-bucket rate limiting (design-decisions.md). Two upstream
+  services exist in this release: kart-identity-service, kart-category-service.
+
+# ---------------------------------------------------------------------------
+# Rate-limit tier definitions (design-decisions.md, "Rate Limiting" decision).
+# Every route below references exactly one of these by name.
+# ---------------------------------------------------------------------------
+rateLimitTiers:
+  anonymous:
+    partitionKey: clientIp
+    algorithm: tokenBucket
+    tokenLimit: 60
+    tokensPerPeriod: 60
+    replenishmentPeriodSeconds: 60
+    queueLimit: 0
+    description: Unauthenticated callers, partitioned by client IP.
+  authenticated:
+    partitionKey: jwtSubClaim
+    algorithm: tokenBucket
+    tokenLimit: 300
+    tokensPerPeriod: 300
+    replenishmentPeriodSeconds: 60
+    queueLimit: 0
+    description: Any caller with a validated, non-revoked JWT, partitioned by the `sub` claim.
+  partner:
+    partitionKey: jwtSubClaim
+    algorithm: tokenBucket
+    tokenLimit: 1200
+    tokensPerPeriod: 1200
+    replenishmentPeriodSeconds: 60
+    queueLimit: 0
+    description: >
+      Caller whose JWT `roles` claim includes "Partner API" (BRD §24.1.1),
+      partitioned by `sub` (the client-credentials client id).
+  admin:
+    partitionKey: jwtSubClaim
+    algorithm: tokenBucket
+    tokenLimit: 600
+    tokensPerPeriod: 600
+    replenishmentPeriodSeconds: 60
+    queueLimit: 0
+    description: >
+      Caller whose JWT `roles` claim includes "Admin", partitioned by `sub`.
+      Not used by any route in this release's two-service scope (neither
+      Identity's nor Category's routed endpoints require this tier at the
+      Gateway itself — Category re-checks Admin on its own side); defined
+      now so a future Admin-gated route needs only a new table row.
+
+# ---------------------------------------------------------------------------
+# Auth requirement definitions.
+# ---------------------------------------------------------------------------
+authRequirements:
+  anonymous:
+    description: No bearer token required. Revocation check is skipped (nothing to check).
+  authenticated:
+    description: >
+      A syntactically valid, non-expired, RS256-signed bearer JWT is required,
+      validated against kart-identity-service's cached JWKS
+      (design-decisions.md's JWT Validation decision), AND the token/subject
+      must not appear in the Redis revocation list (design-decisions.md's
+      Identity Revocation-List decision). Failing either check rejects the
+      request before it is proxied (edge-cases.md).
+      Per ADR-0023: the original client JWT is forwarded to the upstream
+      unchanged (Authorization: Bearer <token>) — no internal header is minted.
+
+# ---------------------------------------------------------------------------
+# Route table.
+# ---------------------------------------------------------------------------
+routes:
+  - routeId: identity-auth
+    pathPrefix: /v1/auth
+    matchMode: prefix
+    upstreamService: kart-identity-service
+    upstreamBasePath: /v1/auth
+    stripPrefix: false
+    authRequirement: anonymous
+    rateLimitTier: authenticated
+    notes: >
+      Proxies kart-identity-service/api-contract.yaml's full /auth/* path set
+      (register, login, refresh, logout, mfa/*, password/reset-*, sso/*)
+      under its own /v1 server prefix — path is forwarded unchanged (no strip),
+      since Identity's own contract already expects the /v1/auth/... shape.
+      Gateway-level authRequirement is "anonymous" because this prefix mixes
+      pre-auth endpoints (login, register) with post-auth ones (logout,
+      refresh) — Identity's own contract, not the Gateway, is the source of
+      truth for which individual /auth/* endpoint needs a bearer token; the
+      Gateway does not re-derive that per-endpoint split here (requirement-spec
+      §5 explicitly scopes the Gateway's own auth gate to the coarse
+      authenticated/not decision, not a duplicate of Identity's own contract).
+      rateLimitTier is "authenticated" rather than "anonymous" as a deliberate
+      exception: edge-cases.md's "Credential Stuffing / Brute-Force on
+      /auth/login" (kart-identity-service/edge-cases.md) already assigns
+      Identity itself the job of per-account/per-IP throttling layered UNDER
+      the Gateway's generic limit — the Gateway's own limit here exists only
+      as the generic BRD §18 tier, not as the anti-brute-force control, so it
+      is not made unusually tight for this one prefix.
+
+  - routeId: identity-jwks
+    pathPrefix: /.well-known/jwks.json
+    matchMode: exact
+    upstreamService: kart-identity-service
+    upstreamBasePath: /.well-known/jwks.json
+    stripPrefix: false
+    authRequirement: anonymous
+    rateLimitTier: anonymous
+    notes: >
+      Unversioned per IANA well-known convention (matches Identity's own
+      contract). Proxied for any external consumer that wants the raw JWKS
+      document directly; the Gateway's OWN JWKS cache (design-decisions.md)
+      calls kart-identity-service's JWKS endpoint directly rather than
+      round-tripping through this proxied route.
+
+  - routeId: category-read
+    pathPrefix: /v1/categories
+    matchMode: prefix
+    httpMethods: [GET]
+    upstreamService: kart-category-service
+    upstreamBasePath: /v1/categories
+    stripPrefix: false
+    authRequirement: anonymous
+    rateLimitTier: anonymous
+    notes: >
+      kart-category-service/api-contract.yaml's GET /categories — public
+      navigation read surface, unconditional CanRead per that service's own
+      ddd-model.md ("unconditional CanRead — any principal, including
+      unauthenticated browse traffic").
+
+  - routeId: category-write
+    pathPrefix: /v1/categories
+    matchMode: prefix
+    httpMethods: [POST, PATCH, DELETE]
+    upstreamService: kart-category-service
+    upstreamBasePath: /v1/categories
+    stripPrefix: false
+    authRequirement: authenticated
+    rateLimitTier: authenticated
+    notes: >
+      kart-category-service/api-contract.yaml's POST /categories, PATCH
+      /categories/{id}, POST /categories/{id}/move, DELETE /categories/{id}.
+      Gateway-level requirement is "authenticated" (bearer token present,
+      validated, not revoked) — NOT "admin"; the fine-grained Admin-role
+      re-check is Category's own job per its clientCredentials security scheme
+      (BRD §24.1.3's three-check flow: Gateway does the coarse check, the
+      owning service does its own fine-grained check). rateLimitTier is
+      "authenticated" rather than "admin" for the same reason: this is a
+      service-to-service (Admin Service calling Category) write path, low
+      volume, and does not need the wider admin-tier budget defined above —
+      revisit if/when a genuinely high-volume Admin-tier route is added.
+
+# ---------------------------------------------------------------------------
+# Explicitly NOT routed (see requirement-spec.md §5 for why).
+# ---------------------------------------------------------------------------
+excludedRoutes:
+  - pattern: /internal/*
+    reason: >
+      kart-identity-service/architecture.md's own Dependencies table names
+      POST /internal/users/{userId}/lock and .../unlock as a direct
+      Admin-Service-to-Identity call with no Gateway hop. Routing it through
+      the Gateway would add scope neither service's approved docs ask for.
+
+# ---------------------------------------------------------------------------
+# Extensibility: adding a future service's route (design-decisions.md).
+# ---------------------------------------------------------------------------
+addingAFutureRoute: >
+  1. Add one cluster (upstream base address) for the new service.
+  2. Add one or more entries to `routes` above: pathPrefix, upstreamService,
+     authRequirement (anonymous|authenticated, or a new coarse-role value if a
+     route needs one), rateLimitTier (one of the four tiers above, or a new
+     named tier if genuinely needed).
+  3. No change to JWT-validation middleware, the revocation-check middleware,
+     or the rate-limiter policy implementations — all are route-agnostic.
+  4. The new service's own api-contract.yaml remains the source of truth for
+     its path prefix and per-endpoint auth needs; this file's route table is a
+     thin routing/auth-tier/rate-tier projection of that contract, same as the
+     identity-auth and category-read/category-write entries above.

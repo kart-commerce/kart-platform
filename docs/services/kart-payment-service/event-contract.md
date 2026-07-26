@@ -8,7 +8,7 @@ source: docs/services/kart-payment-service/ddd-model.md, docs/services/kart-paym
 
 # Event Contract: kart-payment-service
 
-Exchange: `ecommerce.events` (per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10's simplified shared `payment.dlq` label is expanded into one DLQ per event below, the same override `kart-offer-service/event-contract.md` already applied for its own BRD-simplified DLQ labels.
+Exchange: `payment.exchange` (owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Every consumer queue below gets its own DLQ per the reusable event standard (`event-standards.md`: "never a shared/global DLQ") — BRD §10's simplified shared `payment.dlq` label is expanded into one DLQ per event below, the same override `kart-offer-service/event-contract.md` already applied for its own BRD-simplified DLQ labels.
 
 | Event | Routing Key | Published/Consumed | Key Fields | Retry | DLQ | Criticality Justification |
 |---|---|---|---|---|---|---|

@@ -1,0 +1,10 @@
+{
+  "service": "kart-analytics-service",
+  "transport": "kafka-only",
+  "exchange": null,
+  "dlx": null,
+  "queues": [],
+  "dlqs": [],
+  "retry": [],
+  "_comment": "Analytics was the first service migrated off RabbitMQ (BRD §15) and consumes exclusively via Kafka (topic per kart-conventions.md's kart.<service>.<entity> naming), with its own Kafka dead-letter topics for post-ingestion failures (design-decisions.md's D5). It owns no RabbitMQ exchange, DLX, or queue — every event it ingests is dual-published to Kafka by that event's own owning service from that service's own RabbitMQ exchange (see each producer's own message-bus-manifest.json)."
+}

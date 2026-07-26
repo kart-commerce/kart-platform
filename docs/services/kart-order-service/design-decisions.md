@@ -145,6 +145,26 @@ Cross-cutting technology/design-pattern choices forced by this service's require
   - Why: the chargeback has already reversed the charge externally by the time this event arrives regardless of Order's current lifecycle position — treating it as illegal pre-`Delivered` would leave Order's own read model wrong about the order's true payment state; a third terminal state would duplicate `Refunded`'s existing meaning for no behavioral difference.
   - Trade-off accepted: the previously-exceptionless "`Refunded` only reachable from `Delivered`" rule now has exactly one named exception — scoped tightly to this one ADR-driven event, not a general loosening of the state machine.
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Order carries `orderId` as its correlation/entity-id field on every log line and trace span, and sits in the **100%-trace-coverage tier** (requirement-spec §3 Observability row) since it is the Saga orchestrator itself — the one service whose traces must let an operator follow a single order across Inventory/Payment/Shipping/Delivery Tracking without gaps. This is purely the logging/tracing/metrics instrumentation layer; the Saga's own timeout, retry, and compensation mechanics are decided separately above (Per-Step Saga Timeout Budget, Retry/DLQ Tiering, Orphaned/Stuck Saga Reconciliation) — this decision only wires the signal that lets those mechanics be observed, e.g. a Grafana-alertable metric on `FulfillmentException`/`ChargebackReceived` entry rate.
+
+## Decision: Global Exception Handling & Consistent Response Model
+
+**Decision:** A single global exception-handling middleware (ASP.NET Core `IExceptionHandler`/`UseExceptionHandler`) is the only place this service catches and translates unhandled exceptions into an HTTP response — no `Handler`/controller/domain code wraps business logic in try/catch purely to log-and-rethrow or log-and-return an error. Every error response (validation failure or unhandled exception) is shaped as an RFC 7807 `ProblemDetails` envelope extended with the platform's standard fields (`traceId`, `errorCode`); every success response follows the same consistent envelope convention as every other Kart service. Both the middleware and the `ProblemDetails` factory are wired once via the shared `Kart.Shared.ErrorHandling` package, not reimplemented locally.
+
+**Options considered:**
+- Per-handler/controller try/catch translating exceptions to a response inline — rejected: duplicates translation logic per endpoint, risks inconsistent status-code/response-shape choices across handlers, and produces double-logging (or missed logging) when a local catch and the global handler both react to the same exception.
+- Platform-standard global exception handler + `Kart.Shared.ErrorHandling`-wired `ProblemDetails` envelope — adopted: one place to change the error shape platform-wide, and a response contract every client (web, admin, partner API) can parse identically regardless of which of the 18 services it's calling.
+
+**Why:** matches the same "one platform-wide implementation, not built locally by each service" pattern already applied to `Kart.Shared.Observability` and `Kart.Shared.Auditing` above — reimplementing exception translation per service is the identical per-service-drift failure mode those decisions already reject. Domain/business errors continue to use the Result/Either pattern (`agent-reusables/docs/standards/api-standards.md`) rather than exceptions; the global handler exists for the genuinely exceptional case (an unhandled infrastructure fault), and logs it exactly once — at `Error` level, tagged with `traceId`/`service` and this service's own primary correlation field named in its Observability & Instrumentation decision above — through the same Serilog/OTel pipeline, never a second, ad-hoc log line from a local catch block.
+
 ## Sign-off
 
 - [x] Reviewed by: Automated architecture pipeline — autonomous completion authorized by project owner

@@ -8,7 +8,7 @@ source: docs/services/kart-wishlist-service/requirement-spec.md, docs/services/k
 
 # Event Contract: kart-wishlist-service
 
-Exchange: `ecommerce.events` (RabbitMQ topic exchange, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — never shared.
+Exchange: `wishlist.exchange` (RabbitMQ topic exchange, owned by this service, per [kart-conventions.md](../../standards/kart-conventions.md)). Routing key convention: `service.entity.action`. Every consumer queue gets its own DLQ per the reusable event standard (`event-standards.md`) — never shared.
 
 ## Published Events
 

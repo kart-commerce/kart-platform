@@ -69,15 +69,35 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
 - **Requirement driving this:** BRD §14's named failure mode ("throughput ceiling under heavy fan-out... 10+ consumer groups per event multiplies effective message rate"); edge-cases.md "High fan-out on every publish risks one slow consumer blocking others" (`ProductCreated`/`ProductPriceChanged` reach five consumer groups — Search, Recommendation, Wishlist, Offer/Pricing, Analytics). This also reconciles requirement-spec's NFR table row ("3x retry, `catalog.dlq`") with the more specific topology below: the NFR row states the retry-count/DLQ *tier*, this decision states how that tier is topologically realized per consumer group, not as one literal shared queue.
 - **Options considered (3):** Per-consumer-group queue and DLQ under the shared topic exchange (BRD §8's stated platform default) · Single shared queue fanned out to all consumers, with one shared `catalog.dlq` · Move high-fan-out catalog events to Kafka ahead of the general Analytics-first migration order (BRD §15).
 - **Decision:**
-  - Chosen: Per-consumer-group queue + DLQ under `ecommerce.events` (bulkhead isolation) — generalizes the fix already made in edge-cases.md.
+  - Chosen: Per-consumer-group queue + DLQ under `product.exchange` (bulkhead isolation) — generalizes the fix already made in edge-cases.md.
   - Why: already the platform's stated default (BRD §8: "Queue per Consumer Group... each service owns its own queue"; §8.3 explicitly rejects the shared-queue option because "one slow consumer blocks all others").
   - Trade-off accepted: still bounded by RabbitMQ's overall fan-out throughput ceiling (BRD §14) — this only defers, not eliminates, an eventual Kafka move for catalog events if volume grows enough.
+
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Product carries `sku` (the variant/priced unit, not the parent product id) as its correlation/entity-id field on every log line and trace span, and sits in the **STANDARD sampling tier** — it is not one of the four Order-Saga services, so it gets the reusable standard's default sampling (100% of error traces, a smaller percentage of successful ones) rather than 100% blanket coverage. A concrete signal fitting this service's own domain: a Grafana dashboard on per-consumer-group publish-to-DLQ rate for the high-fan-out `ProductCreated`/`ProductPriceChanged` events (the Bulkhead Isolation decision above) gives visibility into whether one slow downstream consumer group (Search, Recommendation, Wishlist, Offer/Pricing) is silently accumulating DLQ backlog.
 
 ## Not Decided Here
 
 - **Serialization format for events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`agent-reusables/docs/standards/event-standards.md`, resolved via this repo's `reusables.config.json`); no divergence reason exists, so nothing to add here.
 - **Aggregate boundary for Variant vs. Product**, the concrete hybrid EAV/JSONB table/column shapes, and `ProductDiscontinued`'s formal domain-event status — explicitly left to the DDD Agent per requirement-spec §2/§6, not re-decided here.
 - **Rating-projection staleness bound** and **audit/rollback depth beyond the replayable event stream** — carried-forward, non-blocking items per requirement-spec §6 (items 7–8), owned by the Architecture Agent, not a design-pattern choice this stage can ground.
+
+## Decision: Global Exception Handling & Consistent Response Model
+
+**Decision:** A single global exception-handling middleware (ASP.NET Core `IExceptionHandler`/`UseExceptionHandler`) is the only place this service catches and translates unhandled exceptions into an HTTP response — no `Handler`/controller/domain code wraps business logic in try/catch purely to log-and-rethrow or log-and-return an error. Every error response (validation failure or unhandled exception) is shaped as an RFC 7807 `ProblemDetails` envelope extended with the platform's standard fields (`traceId`, `errorCode`); every success response follows the same consistent envelope convention as every other Kart service. Both the middleware and the `ProblemDetails` factory are wired once via the shared `Kart.Shared.ErrorHandling` package, not reimplemented locally.
+
+**Options considered:**
+- Per-handler/controller try/catch translating exceptions to a response inline — rejected: duplicates translation logic per endpoint, risks inconsistent status-code/response-shape choices across handlers, and produces double-logging (or missed logging) when a local catch and the global handler both react to the same exception.
+- Platform-standard global exception handler + `Kart.Shared.ErrorHandling`-wired `ProblemDetails` envelope — adopted: one place to change the error shape platform-wide, and a response contract every client (web, admin, partner API) can parse identically regardless of which of the 18 services it's calling.
+
+**Why:** matches the same "one platform-wide implementation, not built locally by each service" pattern already applied to `Kart.Shared.Observability` and `Kart.Shared.Auditing` above — reimplementing exception translation per service is the identical per-service-drift failure mode those decisions already reject. Domain/business errors continue to use the Result/Either pattern (`agent-reusables/docs/standards/api-standards.md`) rather than exceptions; the global handler exists for the genuinely exceptional case (an unhandled infrastructure fault), and logs it exactly once — at `Error` level, tagged with `traceId`/`service` and this service's own primary correlation field named in its Observability & Instrumentation decision above — through the same Serilog/OTel pipeline, never a second, ad-hoc log line from a local catch block.
 
 ## Sign-off
 
