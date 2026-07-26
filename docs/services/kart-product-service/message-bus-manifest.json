@@ -1,32 +1,64 @@
 {
   "service": "kart-product-service",
-  "exchange": { "name": "product.exchange", "type": "topic", "durable": true },
-  "dlx": { "name": "product.dlx", "type": "topic", "durable": true },
+  "exchanges": [
+    { "name": "product.exchange", "type": "topic", "durable": true },
+    { "name": "product.dlx", "type": "topic", "durable": true }
+  ],
+  "externalExchanges": [
+    { "name": "review.exchange", "type": "topic", "durable": true }
+  ],
+  "publishedEvents": [
+    { "eventType": "ProductCreated", "exchange": "product.exchange", "routingKey": "product.product.created" },
+    { "eventType": "ProductPriceChanged", "exchange": "product.exchange", "routingKey": "product.price.changed" },
+    { "eventType": "ProductUpdated", "exchange": "product.exchange", "routingKey": "product.product.updated" },
+    { "eventType": "ProductDiscontinued", "exchange": "product.exchange", "routingKey": "product.product.discontinued" }
+  ],
   "queues": [
     {
       "name": "product.review-events.queue",
+      "durable": true,
       "bindings": [
         { "exchange": "review.exchange", "routingKey": "review.review.submitted" },
         { "exchange": "review.exchange", "routingKey": "review.review.updated" }
       ],
-      "arguments": {
-        "x-dead-letter-exchange": "product.dlx",
-        "x-dead-letter-routing-key": "product.review-events.dlq"
+      "deadLetter": {
+        "exchange": "product.dlx",
+        "routingKey": "product.review-events.dlq"
+      },
+      "retryLadder": {
+        "requeueTo": "product.review-events.queue",
+        "tiers": [
+          { "name": "product.review-events.retry.30s", "ttlMs": 30000 },
+          { "name": "product.review-events.retry.60s", "ttlMs": 60000 }
+        ]
       }
-    }
-  ],
-  "dlqs": [
-    { "name": "product.review-events.dlq", "bindings": [{ "exchange": "product.dlx", "routingKey": "product.review-events.dlq" }] }
-  ],
-  "retry": [
+    },
     {
-      "name": "product.review-events.retry.30s",
-      "arguments": {
-        "x-message-ttl": 30000,
-        "x-dead-letter-exchange": "",
-        "x-dead-letter-routing-key": "product.review-events.queue"
+      "name": "product.catalog-projection.queue",
+      "durable": true,
+      "bindings": [
+        { "exchange": "product.exchange", "routingKey": "product.product.created" },
+        { "exchange": "product.exchange", "routingKey": "product.price.changed" },
+        { "exchange": "product.exchange", "routingKey": "product.product.updated" },
+        { "exchange": "product.exchange", "routingKey": "product.product.discontinued" }
+      ],
+      "deadLetter": {
+        "exchange": "product.dlx",
+        "routingKey": "product.catalog-projection.dlq"
+      },
+      "retryLadder": {
+        "requeueTo": "product.catalog-projection.queue",
+        "tiers": [
+          { "name": "product.catalog-projection.retry.30s", "ttlMs": 30000 },
+          { "name": "product.catalog-projection.retry.60s", "ttlMs": 60000 },
+          { "name": "product.catalog-projection.retry.120s", "ttlMs": 120000 }
+        ]
       }
     }
   ],
-  "_comment": "Product publishes ProductCreated/ProductPriceChanged/ProductUpdated/ProductDiscontinued onto product.exchange (own topology, not shown — Search/Recommendation/Wishlist/Offer/Analytics each bind their own per-consumer-group queue to it, per design-decisions.md's Bulkhead Isolation decision)."
+  "deadLetterQueues": [
+    { "name": "product.review-events.dlq", "exchange": "product.dlx", "routingKey": "product.review-events.dlq" },
+    { "name": "product.catalog-projection.dlq", "exchange": "product.dlx", "routingKey": "product.catalog-projection.dlq" }
+  ],
+  "_comment": "Reconciled to the mature nested manifest shape kart-identity-service/kart-inventory-service/kart-category-service already use (exchanges[]/externalExchanges[]/publishedEvents[]/queues[with deadLetter+retryLadder]/deadLetterQueues[]), superseding this file's earlier flatter shape (exchange/dlx/queues/dlqs/retry as siblings). Two queues: 'product.review-events.queue' consumes review.exchange's ReviewSubmitted/ReviewUpdated (ratingSummary-only projection, ticket PRD-6, 2x retry per event-contract.md) — one queue/DLQ for both routing keys since both are the same consumer group (this service), matching kart-inventory-service's own 'inventory.order-events.queue' precedent of bundling multiple related external routing keys under one queue/DLQ. 'product.catalog-projection.queue' is this service's own self-consumption of the four events it publishes onto product.exchange, so the write-side (PostgreSQL) to read-side (MongoDB product_read_model) sync flows through the same manifest-driven topology/retry-ladder/DLQ machinery as any other consumer, instead of a bespoke in-process sync path. Search/Recommendation/Wishlist/Offer/Analytics each bind their own separate per-consumer-group queue to product.exchange — not shown here, since a manifest only ever declares the exchanges/queues this service itself owns and directly interacts with (see kart-category-service/contracts/message-bus-manifest.json's identical convention)."
 }
