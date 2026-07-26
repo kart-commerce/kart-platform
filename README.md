@@ -17,12 +17,14 @@ cp reusables.config.example.json reusables.config.json
 
 - [`docs/requirements/kart-requirements.md`](docs/requirements/kart-requirements.md) — business requirements (BRD). **Synced copy, not the source** — edit the BRD in the standalone [`kart-requirements`](https://github.com/kakon-mehedi/kart-requirements) repo and copy changes here, not the other way around.
 - [`docs/PLATFORM_BLUEPRINT.md`](docs/PLATFORM_BLUEPRINT.md) — implementation blueprint for the agent pipeline that builds Kart
+- [`docs/releases/`](docs/releases/README.md) — release planning: the governing rules (FE/BE timing, load/stress-test cadence, why backend sequencing is sourced from `docs/services/README.md` rather than re-derived) plus the actual release-by-release scope/checklist/common-mistakes/GitHub-release-items, generated in under a second per release by [`scripts/release.sh`](scripts/release.sh) from [`docs/releases/releases.json`](docs/releases/releases.json) (the single source of truth for scope)
 - [`docs/standards/kart-conventions.md`](docs/standards/kart-conventions.md) — KART-specific naming, bounded contexts, and conventions layered on top of the shared standards in `agent-reusables`
 - [`docs/standards/content-placement-policy.md`](docs/standards/content-placement-policy.md) — decision rules for whether new content belongs in this repo, in `agent-reusables`, or in a service's own repo
 - [`docs/adr/`](docs/adr/) — architecture decision records specific to Kart (the blank ADR template is reusable and lives in `agent-reusables`)
 - [`docs/architecture/`](docs/architecture/) — cumulative service-boundary graph and container diagram, built up as each service passes through the Architecture Agent
 - [`docs/ddd/ubiquitous-language.md`](docs/ddd/ubiquitous-language.md) — cross-service glossary, single term ownership, built up as each service passes through the DDD Agent
-- [`docs/services/`](docs/services/README.md) — **start here for any service**. Index of all 18 service folders, each with its own `requirement-spec.md` → `edge-cases.md` → `architecture.md` → `ddd-model.md` → contracts → `tickets.md`, populated by the agent pipeline below
+- [`docs/services/`](docs/services/README.md) — **start here for any backend service**. Index of all 18 service folders, each with its own `requirement-spec.md` → `edge-cases.md` → `architecture.md` → `ddd-model.md` → contracts → `tickets.md`, populated by the agent pipeline below
+- [`docs/client/`](docs/client/README.md) — **start here for the client tier**. Two Angular apps — `kart-web` (Customer storefront) and `kart-admin-web` (Support/Admin back office) — each with its own `requirement-spec.md` → `architecture.md` → (`design-tokens.md`/`api-integration-map.md` for `kart-web`). Project-agnostic frontend standards live in `agent-reusables/docs/standards/frontend/`, same split as the backend
 - [`AGENTS.md`](AGENTS.md) — the real system instructions for any agent/tool working in this repo (rules, reading order, approval-gate policy). Read directly — no per-tool pointer file in this repo.
 
 ## Agent Pipeline

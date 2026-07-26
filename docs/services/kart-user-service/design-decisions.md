@@ -46,6 +46,16 @@ Cross-cutting technology/design-pattern choices this service's approved `require
   - Why: `docs/standards/kart-conventions.md`'s "Money-Moving Criticality" rule already establishes the platform pattern of a distinct high-stakes tier layered on the standard default; ADR-0016 extends that same pattern by analogy to a compliance-critical event rather than a money-moving one — a silently-DLQ'd erasure event is a compliance failure, not a tolerable staleness window, so it needs Payment's escalation posture without literally sharing Payment's queue/DLQ (kept separate per the platform's per-consumer-queue default).
   - Trade-off accepted: this service now maintains two operationally distinct alerting/paging configurations instead of one uniform policy — accepted because the two event classes have genuinely different failure consequences (a lost profile-update retry vs. a lost legal-erasure guarantee).
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** User Service is not one of the four 100%-trace-coverage saga services, so it runs the reusable standard's default sampling, consistent with its own 99.9%-secondary Availability classification. `userId` is the correlation field carried on every log/span/exemplar — the same key `UserRegistered`/`UserAccountUpdated`/`UserDataErased` already carry, so a trace for a profile write, an Identity-sync reconciliation, or the erasure tombstone write all pivot on the same id; this is purely a correlation/instrumentation concern, distinct from the GDPR erasure-mechanics decisions ADR-0016 and this file's own dedup/Outbox decisions already cover. One concrete signal worth a dashboard panel: the Outbox-poller lag metric this file's Transactional Outbox decision already commits to alerting on — exposing it as a Prometheus gauge with a Grafana alert rule turns that edge-case mitigation into something actually watched, not just designed for.
+
 ## Not Decided Here
 
 - **Identity/User data-ownership boundary** — fully resolved by `docs/adr/0006-identity-user-profile-sync-event.md` (Identity owns login-email/display-name as source of truth, publishes `UserAccountUpdated`; User Service keeps a denormalized, eventually-consistent copy). Requirement-spec §1/§6 item 1 already cites this ADR directly as the closure of the former Open Question 1 — not re-decided here, only its idempotent-consumption pattern is generalized above.
@@ -56,7 +66,17 @@ Cross-cutting technology/design-pattern choices this service's approved `require
 
 ## Escalations
 
-None. All four decisions above are grounded directly in this service's approved `requirement-spec.md`/`edge-cases.md`, citing `docs/adr/0006-identity-user-profile-sync-event.md` and `docs/adr/0016-user-gdpr-erasure-policy.md` where a chosen fix generalizes into a standing pattern, and are consistent with the project's shared standards (`docs/standards/kart-conventions.md`'s money-moving-criticality convention, extended by analogy; the platform's Outbox/idempotent-consumer defaults). No genuinely equivalent options requiring a business call were found.
+None. All five decisions above are grounded directly in this service's approved `requirement-spec.md`/`edge-cases.md`, citing `docs/adr/0006-identity-user-profile-sync-event.md` and `docs/adr/0016-user-gdpr-erasure-policy.md` where a chosen fix generalizes into a standing pattern, and are consistent with the project's shared standards (`docs/standards/kart-conventions.md`'s money-moving-criticality convention, extended by analogy; the platform's Outbox/idempotent-consumer defaults; observability-standards.md's Serilog/OpenTelemetry mandate). No genuinely equivalent options requiring a business call were found.
+
+## Decision: Global Exception Handling & Consistent Response Model
+
+**Decision:** A single global exception-handling middleware (ASP.NET Core `IExceptionHandler`/`UseExceptionHandler`) is the only place this service catches and translates unhandled exceptions into an HTTP response — no `Handler`/controller/domain code wraps business logic in try/catch purely to log-and-rethrow or log-and-return an error. Every error response (validation failure or unhandled exception) is shaped as an RFC 7807 `ProblemDetails` envelope extended with the platform's standard fields (`traceId`, `errorCode`); every success response follows the same consistent envelope convention as every other Kart service. Both the middleware and the `ProblemDetails` factory are wired once via the shared `Kart.Shared.ErrorHandling` package, not reimplemented locally.
+
+**Options considered:**
+- Per-handler/controller try/catch translating exceptions to a response inline — rejected: duplicates translation logic per endpoint, risks inconsistent status-code/response-shape choices across handlers, and produces double-logging (or missed logging) when a local catch and the global handler both react to the same exception.
+- Platform-standard global exception handler + `Kart.Shared.ErrorHandling`-wired `ProblemDetails` envelope — adopted: one place to change the error shape platform-wide, and a response contract every client (web, admin, partner API) can parse identically regardless of which of the 18 services it's calling.
+
+**Why:** matches the same "one platform-wide implementation, not built locally by each service" pattern already applied to `Kart.Shared.Observability` and `Kart.Shared.Auditing` above — reimplementing exception translation per service is the identical per-service-drift failure mode those decisions already reject. Domain/business errors continue to use the Result/Either pattern (`agent-reusables/docs/standards/api-standards.md`) rather than exceptions; the global handler exists for the genuinely exceptional case (an unhandled infrastructure fault), and logs it exactly once — at `Error` level, tagged with `traceId`/`service` and this service's own primary correlation field named in its Observability & Instrumentation decision above — through the same Serilog/OTel pipeline, never a second, ad-hoc log line from a local catch block.
 
 ## Sign-off
 

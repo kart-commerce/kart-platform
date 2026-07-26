@@ -2,7 +2,7 @@
 
 ### Senior Engineer System Design Mastery Project
 
-**Stack:** .NET 9 / ASP.NET Core · PostgreSQL · MongoDB (Sharded) · RabbitMQ → Kafka · Redis · Docker · Kubernetes · Nginx · API Gateway
+**Stack:** .NET 9 / ASP.NET Core · PostgreSQL · MongoDB (Sharded) · RabbitMQ → Kafka · Redis · Docker · Kubernetes · Nginx · API Gateway · Serilog + OpenTelemetry (logs/metrics/traces) · Prometheus · Grafana (Loki + Tempo)
 
 ---
 
@@ -652,11 +652,14 @@ Nginx sits in front of the gateway for TLS termination, static asset serving, an
 
 ## 23. Observability
 
-|Pillar|Implementation|
-|---|---|
-|Structured Logging|JSON logs with `traceId`, `service`, `level`, `orderId` fields — machine-parseable, not free text|
-|Metrics|RED metrics (Rate, Errors, Duration) per service + business metrics (orders/min, cart abandonment)|
-|Distributed Tracing|W3C Trace Context propagated through HTTP headers and message headers so a single order can be traced across all 8+ services it touches|
+**Stack (mandatory, every service):** Serilog + OpenTelemetry for instrumentation, the Grafana LGTM stack on the backend — **Loki** (logs), **Grafana** (visualization/alerting), **Tempo** (traces), **Prometheus** (metrics). Full pillar-by-pillar detail (package choices, sampling policy, dashboard/alerting conventions, correlation-id mechanics) lives in the platform's reusable [Observability Standards](https://github.com/kakon-mehedi/agent-reusables) (`docs/standards/observability-standards.md` there), layered with Kart-specific conventions (shared instrumentation package, 100%-trace-tier service list, per-service entity-id fields) in `docs/standards/kart-conventions.md` — not restated here.
+
+|Pillar|Tool|Implementation|
+|---|---|---|
+|Structured Logging|Serilog → OpenTelemetry Collector (OTLP) → Grafana Loki|JSON logs with `traceId`, `service`, `level`, `orderId` fields — machine-parseable, not free text|
+|Metrics|Prometheus (scraped `/metrics`, OpenTelemetry Metrics SDK or `prometheus-net`)|RED metrics (Rate, Errors, Duration) per service + business metrics (orders/min, cart abandonment)|
+|Distributed Tracing|OpenTelemetry SDK → Grafana Tempo|W3C Trace Context propagated through HTTP headers and message headers so a single order can be traced across all 8+ services it touches|
+|Visualization & Alerting|Grafana|Single pane of glass across Loki/Tempo/Prometheus (log → trace → metric via the shared trace id); dashboards provisioned as code; alert rules mirror the event retry/DLQ criticality tiers (§10)|
 
 **Normal Logging vs Structured Logging**: normal logging writes free-text strings meant for a human reading a terminal (`"Order 123 failed"`); structured logging writes key-value/JSON records meant for a machine to index, filter, and aggregate (`{"event":"order_failed","orderId":"123","reason":"payment_declined"}`) — the latter is what makes "show me all failed orders for user X in the last hour" a query instead of a `grep` archaeology project.
 

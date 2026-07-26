@@ -55,12 +55,32 @@ Cross-cutting technology/design-pattern choices this service's requirement-spec.
   - Why: Domain Invariant §4 explicitly rules out a "separately-cached or stale aggregate" for facets — introducing a Redis (or equivalent) result cache would reopen exactly the staleness problem the invariant forecloses, adding a second, response-level staleness clock the requirement-spec never asks for on top of the already-bounded index-freshness one (Decision 1)
   - Trade-off accepted: every `/search` call pays a live query cost against the 100M-SKU index instead of a cache-hit shortcut, unlike the caching layers Product/Recommendation use for their own reads — accepted because the Latency NFR is engineered to hold via the facet-query resilience pattern (Decision 3) instead; if load-testing later shows the NFR can't be met without a cache, that is a genuine Architecture Agent revisit against a standing invariant, not something this stage should pre-decide around
 
+## Decision: Observability & Instrumentation
+
+**Decision:** Serilog (structured logging) + OpenTelemetry SDK (distributed tracing + metrics), per the platform's reusable observability-standards.md and this repo's kart-conventions.md Observability section. Logs export via OTLP → Grafana Loki; traces via OTLP → Grafana Tempo; metrics scraped by Prometheus from `/metrics`; Grafana provides dashboards and alerting. Wired once via the shared `Kart.Shared.Observability` package, not reimplemented per service.
+
+**Options considered:**
+- Ad-hoc per-service logging/APM tool choice — rejected: fragments dashboards/alerting across 18 services and breaks single-trace-id correlation across the platform.
+- Platform-standard Serilog + OpenTelemetry + Grafana LGTM stack — adopted: one mental model and one Grafana pane across every service.
+
+**Why:** Search is not one of the four 100%-trace-coverage saga services, so it runs the reusable standard's default sampling; a request-scoped `queryId` is the correlation field for `GET /search` spans/logs (Search has no per-user or per-entity ownership dimension to key on instead, §3), while the indexing-consumer pipeline carries `sku` to match what `ProductCreated`/`ProductPriceChanged`/`ProductDiscontinued` actually key on. One concrete signal worth a dashboard panel: index-catch-up lag (Outbox-insert-to-searchable), since Decision 1 above already commits this service to a P95 < 5s / P99 < 15s bound — the Prometheus histogram for that lag, with a trace exemplar per bucket, is what turns that NFR from a paper commitment into something an on-call engineer can actually watch and alert on.
+
 ## Not Decided Here
 
 - **Serialization format for consumed events/payloads** — neither requirement-spec.md nor edge-cases.md states a service-specific forcing requirement beyond the platform's existing event-schema-versioning default (`docs/standards/event-standards.md`); no divergence reason exists, so nothing to add here.
 - **Ranking/relevance scoring formula and sponsored-placement policy (capped vs. auctioned) — since resolved.** Was carried forward here as a non-blocking business/product tuning decision (requirement-spec Open Question 2). Now resolved at the DDD Agent stage (`ddd-model.md`'s `RankingProfile` value object): capped additive sponsored boost, not an auction — no bidding/marketplace mechanism exists anywhere in the BRD's 18-service scope for an auctioned model to run against, so "capped" is the only buildable default; see `ddd-model.md` for the full formula and rationale.
 - **`ProductDiscontinued` formal payload/schema — since resolved.** Formalized by the DDD Agent stage at `kart-product-service/ddd-model.md`/`event-contract.md`: `sku, discontinuedAt`, 3x retry, `search.product-discontinued.dlq` on this service's own consumer side. This document's Decision 2 (how Search's own write path treats a discontinuation signal once received) is unaffected.
 - **Index/document schema, sharding, and OpenSearch mapping design** — explicitly left to the Architecture and Database Design Agents per this stage's scope; only the rebuild strategy (Decision 4) and write-guard mechanism (Decision 2) are cross-cutting patterns fixed here. See `database-design.md`.
+
+## Decision: Global Exception Handling & Consistent Response Model
+
+**Decision:** A single global exception-handling middleware (ASP.NET Core `IExceptionHandler`/`UseExceptionHandler`) is the only place this service catches and translates unhandled exceptions into an HTTP response — no `Handler`/controller/domain code wraps business logic in try/catch purely to log-and-rethrow or log-and-return an error. Every error response (validation failure or unhandled exception) is shaped as an RFC 7807 `ProblemDetails` envelope extended with the platform's standard fields (`traceId`, `errorCode`); every success response follows the same consistent envelope convention as every other Kart service. Both the middleware and the `ProblemDetails` factory are wired once via the shared `Kart.Shared.ErrorHandling` package, not reimplemented locally.
+
+**Options considered:**
+- Per-handler/controller try/catch translating exceptions to a response inline — rejected: duplicates translation logic per endpoint, risks inconsistent status-code/response-shape choices across handlers, and produces double-logging (or missed logging) when a local catch and the global handler both react to the same exception.
+- Platform-standard global exception handler + `Kart.Shared.ErrorHandling`-wired `ProblemDetails` envelope — adopted: one place to change the error shape platform-wide, and a response contract every client (web, admin, partner API) can parse identically regardless of which of the 18 services it's calling.
+
+**Why:** matches the same "one platform-wide implementation, not built locally by each service" pattern already applied to `Kart.Shared.Observability` and `Kart.Shared.Auditing` above — reimplementing exception translation per service is the identical per-service-drift failure mode those decisions already reject. Domain/business errors continue to use the Result/Either pattern (`agent-reusables/docs/standards/api-standards.md`) rather than exceptions; the global handler exists for the genuinely exceptional case (an unhandled infrastructure fault), and logs it exactly once — at `Error` level, tagged with `traceId`/`service` and this service's own primary correlation field named in its Observability & Instrumentation decision above — through the same Serilog/OTel pipeline, never a second, ad-hoc log line from a local catch block.
 
 ## Sign-off
 
